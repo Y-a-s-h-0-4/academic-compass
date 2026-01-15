@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import { motion } from "framer-motion";
-import { MindMapNode } from "@/components/MindMapNode";
+import { MindMapNode } from "./MindMapNode";
 import { Button } from "@/components/ui/button";
 import { ZoomIn, ZoomOut, Maximize2, RotateCcw } from "lucide-react";
 

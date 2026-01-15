@@ -11,6 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@clerk/clerk-react": "^5.59.3",
     "@fontsource/instrument-serif": "^5.2.8",
     "@fontsource/inter": "^5.2.8",
     "@hookform/resolvers": "^3.10.0",

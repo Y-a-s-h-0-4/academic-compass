@@ -4,12 +4,12 @@ import { Button } from "@/components/ui/button";
 
 interface VoiceButtonProps {
   isListening: boolean;
-  isSpeaking: boolean;
+  isSpeaking?: boolean;
   onToggle: () => void;
   disabled?: boolean;
 }
 
-export const VoiceButton = ({ isListening, isSpeaking, onToggle, disabled }: VoiceButtonProps) => {
+export const VoiceButton = ({ isListening, isSpeaking = false, onToggle, disabled }: VoiceButtonProps) => {
   return (
     <div className="relative">
       {/* Pulse rings when active */}
@@ -32,6 +32,24 @@ export const VoiceButton = ({ isListening, isSpeaking, onToggle, disabled }: Voi
             />
           </>
         )}
+        {isSpeaking && (
+          <>
+            <motion.div
+              className="absolute inset-0 rounded-full bg-accent/30"
+              initial={{ scale: 1, opacity: 0.6 }}
+              animate={{ scale: 2, opacity: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 1.5, repeat: Infinity }}
+            />
+            <motion.div
+              className="absolute inset-0 rounded-full bg-accent/20"
+              initial={{ scale: 1, opacity: 0.4 }}
+              animate={{ scale: 2.5, opacity: 0 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 1.5, repeat: Infinity, delay: 0.3 }}
+            />
+          </>
+        )}
       </AnimatePresence>
 
       {/* Main button */}
@@ -44,7 +62,7 @@ export const VoiceButton = ({ isListening, isSpeaking, onToggle, disabled }: Voi
           size="icon-xl"
           onClick={onToggle}
           disabled={disabled}
-          className={`relative z-10 ${isListening ? 'bg-primary shadow-glow' : isSpeaking ? 'bg-accent' : 'bg-secondary hover:bg-primary'}`}
+          className={`relative z-10 ${isListening ? 'bg-primary shadow-glow' : isSpeaking ? 'bg-accent shadow-glow' : 'bg-secondary hover:bg-primary'}`}
         >
           <AnimatePresence mode="wait">
             {isListening ? (
@@ -91,7 +109,7 @@ export const VoiceButton = ({ isListening, isSpeaking, onToggle, disabled }: Voi
             {[...Array(5)].map((_, i) => (
               <motion.div
                 key={i}
-                className="w-1 bg-primary rounded-full"
+                className={`w-1 rounded-full ${isSpeaking ? 'bg-accent' : 'bg-primary'}`}
                 animate={{
                   height: [8, 20, 8],
                 }}

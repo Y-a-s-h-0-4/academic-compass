@@ -8,7 +8,8 @@ import {
   Plus,
   ChevronLeft,
   ChevronRight,
-  Sparkles
+  Sparkles,
+  Database,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useState } from "react";
@@ -22,6 +23,7 @@ interface SidebarProps {
 
 const navItems = [
   { id: "home", icon: Home, label: "Home" },
+  { id: "sources", icon: Database, label: "Sources" },
   { id: "courses", icon: BookOpen, label: "Courses" },
   { id: "mindmap", icon: Brain, label: "Mind Map" },
   { id: "analytics", icon: BarChart3, label: "Analytics" },

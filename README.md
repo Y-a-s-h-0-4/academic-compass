@@ -1,73 +1,86 @@
-# Welcome to your Lovable project
+# Academic Compass – Consolidated Guide
 
-## Project info
+## Overview
+Modern AI-powered learning app with Vite/React frontend and FastAPI backend (notebook-lm clone) using OpenAI GPT-4o-mini, ChromaDB embeddings, and Supabase Postgres for persistence.
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+## Project Structure
+- frontend: `src/` (Vite/React, Tailwind, shadcn)
+- backend: `notebook-lm-clone/` (FastAPI, RAG, podcast TTS)
+- public assets: `public/`
+- tooling: ESLint/Tailwind/Vite configs
+- lockfiles: `package-lock.json`, `bun.lockb`, `uv.lock`, `pyproject.toml`
 
-## How can I edit this code?
+## Prerequisites
+- Node 18+ and npm
+- Python 3.10+ (uses virtual env `.venv` under project root)
+- OpenAI API key; Supabase Postgres URL (with SSL) if using persistence
 
-There are several ways of editing your application.
+## Environment
+Create `.env` at repo root for frontend and `.env` inside `notebook-lm-clone/` for backend.
 
-**Use Lovable**
-
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
-
-Changes made via Lovable will be committed automatically to this repo.
-
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
-
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
+Frontend `.env` example:
+```
+VITE_CLERK_PUBLISHABLE_KEY=pk_test_...
+VITE_NOTEBOOK_API_URL=http://localhost:8000
 ```
 
-**Edit a file directly in GitHub**
+Backend `.env` example (notebook-lm-clone/.env):
+```
+OPENAI_API_KEY=sk-...
+FIRECRAWL_API_KEY=...
+ASSEMBLYAI_API_KEY=...
+SUPABASE_DB_URL=postgresql://user:pass@host:5432/postgres
+ZEP_API_KEY=...
+```
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+## Install
+Frontend:
+```
+npm install
+```
 
-**Use GitHub Codespaces**
+Backend (in `notebook-lm-clone/`):
+```
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -e .
+pip install fastapi uvicorn psycopg2-binary edge-tts
+```
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+## Run
+Start backend (from repo root):
+```
+$env:PYTHONPATH="C:\Projects\academic-compass\notebook-lm-clone"; cd notebook-lm-clone; ..\.venv\Scripts\python.exe api/main.py
+```
 
-## What technologies are used for this project?
+Start frontend (new terminal at repo root):
+```
+npm run dev -- --host --port 3000
+```
 
-This project is built with:
+## Key Behaviors
+- Conversation history is persisted per user in Postgres (`conversation_history` table).
+- RAG queries scoped per user; sources stored in `notebooklm_sources`.
+- Podcast generation works only for uploaded files (PDF/docs). Web URLs are rejected.
+- Scroll: only the chat messages area scrolls; header/sidebar/input stay fixed.
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+## API Notes (backend)
+- `POST /api/ingest` files or `web_url` with `user_id`
+- `GET /api/sources?user_id=` list sources
+- `POST /api/query` { query, user_id }
+- `POST /api/summary` { user_id }
+- `POST /api/podcast` { source_path, user_id } (files only)
+- `POST /api/conversations/save` and `GET /api/conversations/{user_id}` for history
 
-## How can I deploy this project?
+## Frontend Notes
+- Auth via Clerk; userId passed to all API calls.
+- Podcast dropdown filters out web sources.
+- Tailwind + shadcn components; theme tokens via CSS variables.
 
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
+## Testing & Dev
+- Frontend: `npm run lint`
+- Backend: add pytest in `notebook-lm-clone/tests/` (not configured yet)
 
-## Can I connect a custom domain to my Lovable project?
-
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+## Housekeeping
+- Generated markdowns and legacy docs were removed; this README is the single source.
+- Keep `.env` files out of version control.

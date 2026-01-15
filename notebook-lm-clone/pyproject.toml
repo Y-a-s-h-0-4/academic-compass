@@ -1,0 +1,29 @@
+[project]
+name = "notebook-lm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "assemblyai>=0.44.3",
+    "crewai>=0.193.2",
+    "crewai-tools>=0.73.1",
+    "fastapi>=0.110.0",
+    "fastembed>=0.7.3",
+    "firecrawl-py>=4.3.6",
+    "ipykernel>=6.30.1",
+    "pymilvus[milvus-lite]>=2.6.2",
+    "scipy>=1.10.0",
+    "pymupdf>=1.26.4",
+    "python-dotenv>=1.1.1",
+    "soundfile>=0.12.1",
+    "python-multipart>=0.0.9",
+    "psycopg2-binary>=2.9.9",
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "transformers>=4.30.0",
+    "uvicorn[standard]>=0.27.0",
+    "yt-dlp>=2024.12.13",
+    "zep-cloud>=3.4.3",
+    "zep-crewai>=1.1.1",
+]
