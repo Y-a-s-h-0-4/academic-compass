@@ -41,7 +41,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
 DB_URL = os.getenv("SUPABASE_DB_URL") or os.getenv("SUPABASE_POSTGRES_URL") or os.getenv("DATABASE_URL")
 
@@ -69,7 +69,11 @@ def get_db_connection():
     if not DB_URL:
         logger.warning("SUPABASE_DB_URL not set; falling back to in-memory registry")
         return None
-    return psycopg2.connect(DB_URL, sslmode="require")
+    try:
+        return psycopg2.connect(DB_URL, sslmode="require")
+    except (psycopg2.OperationalError, psycopg2.DatabaseError) as e:
+        logger.warning(f"Database connection failed: {e}; falling back to in-memory registry")
+        return None
 
 
 def ensure_sources_table():
@@ -210,7 +214,7 @@ def get_user_pipeline(user_id: str) -> Dict[str, object]:
     rag_generator = RAGGenerator(
         embedding_generator=embedding_generator,
         vector_db=vector_db,
-        openai_api_key=OPENAI_API_KEY,
+        gemini_api_key=GEMINI_API_KEY,
     )
 
     user_pipelines[user_id] = {
@@ -311,8 +315,8 @@ async def query_stream(req: QueryRequest):
     """
     Streaming version: sends text character by character for typewriter effect with TTS
     """
-    if not OPENAI_API_KEY:
-        raise HTTPException(status_code=400, detail="OpenAI API key not configured")
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=400, detail="Gemini API key not configured")
 
     logger.info(f"Query streaming request: {req.query[:50]}..., user: {req.user_id}")
     

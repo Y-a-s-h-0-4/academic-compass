@@ -1,6 +1,8 @@
 import { motion } from "framer-motion";
-import { User, Bot, FileText, ExternalLink } from "lucide-react";
+import { User, Bot, FileText, ExternalLink, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { useState } from "react";
 
 interface Source {
   id: string;
@@ -14,17 +16,23 @@ interface ChatMessageProps {
   content: string;
   sources?: Source[];
   timestamp?: Date;
+  isSpeaking?: boolean;
+  onDelete?: () => void;
+  messageId?: string;
 }
 
-export const ChatMessage = ({ role, content, sources, timestamp }: ChatMessageProps) => {
+export const ChatMessage = ({ role, content, sources, timestamp, isSpeaking = false, onDelete, messageId }: ChatMessageProps) => {
   const isUser = role === "user";
+  const [showDeleteButton, setShowDeleteButton] = useState(false);
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
-      className={`flex gap-4 ${isUser ? 'flex-row-reverse' : ''}`}
+      className={`flex gap-4 ${isUser ? 'flex-row-reverse' : ''} group`}
+      onMouseEnter={() => !isUser && !isSpeaking && setShowDeleteButton(true)}
+      onMouseLeave={() => setShowDeleteButton(false)}
     >
       {/* Avatar */}
       <div className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${
@@ -78,6 +86,25 @@ export const ChatMessage = ({ role, content, sources, timestamp }: ChatMessagePr
           <p className="mt-2 text-xs text-muted-foreground">
             {timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
           </p>
+        )}
+
+        {/* Delete Button - shown after TTS finishes */}
+        {!isUser && !isSpeaking && showDeleteButton && onDelete && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className="mt-2"
+          >
+            <Button
+              size="sm"
+              variant="destructive"
+              className="w-full"
+              onClick={onDelete}
+            >
+              <Trash2 className="w-3 h-3 mr-1" />
+              Delete
+            </Button>
+          </motion.div>
         )}
       </div>
     </motion.div>

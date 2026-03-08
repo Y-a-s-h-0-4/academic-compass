@@ -1,7 +1,7 @@
 # Academic Compass – Consolidated Guide
 
 ## Overview
-Modern AI-powered learning app with Vite/React frontend and FastAPI backend (notebook-lm clone) using OpenAI GPT-4o-mini, ChromaDB embeddings, and Supabase Postgres for persistence.
+Modern AI-powered learning app with Vite/React frontend and FastAPI backend (notebook-lm clone) using Google Gemini, ChromaDB embeddings, and Supabase Postgres for persistence.
 
 ## Project Structure
 - frontend: `src/` (Vite/React, Tailwind, shadcn)
@@ -13,7 +13,7 @@ Modern AI-powered learning app with Vite/React frontend and FastAPI backend (not
 ## Prerequisites
 - Node 18+ and npm
 - Python 3.10+ (uses virtual env `.venv` under project root)
-- OpenAI API key; Supabase Postgres URL (with SSL) if using persistence
+- Google Gemini API key; Supabase Postgres URL (with SSL) if using persistence
 
 ## Environment
 Create `.env` at repo root for frontend and `.env` inside `notebook-lm-clone/` for backend.
@@ -26,7 +26,7 @@ VITE_NOTEBOOK_API_URL=http://localhost:8000
 
 Backend `.env` example (notebook-lm-clone/.env):
 ```
-OPENAI_API_KEY=sk-...
+GEMINI_API_KEY=...
 FIRECRAWL_API_KEY=...
 ASSEMBLYAI_API_KEY=...
 SUPABASE_DB_URL=postgresql://user:pass@host:5432/postgres

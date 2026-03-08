@@ -38,8 +38,8 @@ class RAGGenerator:
         self,
         embedding_generator: EmbeddingGenerator,
         vector_db: MilvusVectorDB,
-        openai_api_key: str,
-        model_name: str = "gpt-4o-mini",
+        gemini_api_key: str,
+        model_name: str = "gemini-2.5-flash",
         temperature: float = 0.1,
         max_tokens: int = 2000
     ):
@@ -47,10 +47,10 @@ class RAGGenerator:
         self.vector_db = vector_db
         
         self.llm = LLM(
-            model=f"openai/{model_name}",
+            model=f"gemini/{model_name}",
             temperature=temperature,
             max_tokens=max_tokens,
-            api_key=openai_api_key
+            api_key=gemini_api_key
         )
         
         self.model_name = model_name

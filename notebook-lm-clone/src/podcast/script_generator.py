@@ -33,9 +33,9 @@ class PodcastScript:
 
 
 class PodcastScriptGenerator:
-    def __init__(self, openai_api_key: str, model_name: str = "gpt-4o-mini"):
+    def __init__(self, gemini_api_key: str, model_name: str = "gemini-2.5-flash"):
         self.llm = LLM(
-            model=f"openai/{model_name}",
+            model=f"gemini/{model_name}",
             temperature=0.7,
             max_tokens=4000
         )

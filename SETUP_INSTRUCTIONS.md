@@ -30,8 +30,8 @@ VITE_NOTEBOOK_API_URL=http://localhost:8000
 
 #### File 2: `notebook-lm-clone/.env` (for backend)
 ```
-# OpenAI API
-OPENAI_API_KEY=your_openai_api_key_here
+# Gemini API
+GEMINI_API_KEY=your_gemini_api_key_here
 
 # Firecrawl (for web scraping)
 FIRECRAWL_API_KEY=your_firecrawl_api_key_here
@@ -106,7 +106,7 @@ Visit: `http://localhost:5173`
 
 ✅ **Upload Documents**: PDF, web pages, or text notes
 ✅ **Vector Search**: ChromaDB for semantic search with embeddings
-✅ **RAG System**: Retrieval-Augmented Generation with GPT-4o-mini
+✅ **RAG System**: Retrieval-Augmented Generation with Gemini-1.5-Flash
 ✅ **Voice Input**: Speech-to-text with auto-submit (2 sec silence)
 ✅ **Text-to-Speech**: Read responses aloud with Edge-TTS
 ✅ **Streaming Responses**: Typewriter effect for real-time feedback
@@ -152,7 +152,7 @@ academic-compass/
 - FastAPI (Python web framework)
 - PostgreSQL (conversation history)
 - ChromaDB (vector database)
-- OpenAI GPT-4o-mini (LLM)
+- Google Gemini 1.5 Flash (LLM)
 - FastEmbed (embeddings: BAAI/bge-small-en-v1.5)
 - Edge-TTS (text-to-speech)
 - Firecrawl (web scraping)

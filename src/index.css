@@ -10,6 +10,81 @@
 
 @layer base {
   :root {
+    --background: 40 30% 98%;
+    --foreground: 30 20% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 30 20% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 30 20% 15%;
+
+    --primary: 38 92% 50%;
+    --primary-foreground: 30 10% 8%;
+
+    --secondary: 40 20% 92%;
+    --secondary-foreground: 30 20% 20%;
+
+    --muted: 40 20% 92%;
+    --muted-foreground: 30 15% 40%;
+
+    --accent: 38 60% 40%;
+    --accent-foreground: 30 20% 15%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 30 12% 85%;
+    --input: 30 12% 85%;
+    --ring: 38 92% 50%;
+
+    --radius: 0.75rem;
+
+    /* Custom tokens */
+    --glass: 0 0% 100% / 0.7;
+    --glass-border: 30 12% 70% / 0.3;
+    --glow-primary: 38 92% 50% / 0.2;
+    --glow-subtle: 38 92% 50% / 0.08;
+
+    /* Gradient tokens */
+    --gradient-primary: linear-gradient(135deg, hsl(38, 92%, 50%), hsl(28, 85%, 45%));
+    --gradient-surface: linear-gradient(180deg, hsl(40, 30%, 98%), hsl(40, 25%, 96%));
+    --gradient-glass: linear-gradient(135deg, hsl(var(--glass)), hsl(40, 20%, 96% / 0.6));
+    --gradient-radial: radial-gradient(ellipse at top, hsl(38, 92%, 50% / 0.12), transparent 60%);
+
+    /* Shadows */
+    --shadow-sm: 0 2px 8px hsl(30 20% 40% / 0.15);
+    --shadow-md: 0 4px 16px hsl(30 20% 40% / 0.2);
+    --shadow-lg: 0 8px 32px hsl(30 20% 40% / 0.25);
+    --shadow-glow: 0 0 40px hsl(var(--glow-primary));
+    --shadow-glow-sm: 0 0 20px hsl(var(--glow-subtle));
+
+    /* Voice visualization */
+    --voice-active: 38 92% 55%;
+    --voice-wave-1: 38 90% 60%;
+    --voice-wave-2: 35 85% 50%;
+    --voice-wave-3: 32 80% 45%;
+
+    /* Status colors */
+    --success: 142 71% 45%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 30 10% 8%;
+    --info: 200 80% 50%;
+    --info-foreground: 0 0% 100%;
+
+    /* Sidebar */
+    --sidebar-background: 40 30% 96%;
+    --sidebar-foreground: 30 20% 20%;
+    --sidebar-primary: 38 92% 50%;
+    --sidebar-primary-foreground: 30 10% 8%;
+    --sidebar-accent: 40 20% 92%;
+    --sidebar-accent-foreground: 30 20% 20%;
+    --sidebar-border: 30 12% 85%;
+    --sidebar-ring: 38 92% 50%;
+  }
+
+  .dark {
     --background: 30 10% 8%;
     --foreground: 40 30% 92%;
 
@@ -37,8 +112,6 @@
     --border: 30 8% 20%;
     --input: 30 8% 18%;
     --ring: 38 92% 50%;
-
-    --radius: 0.75rem;
 
     /* Custom tokens */
     --glass: 30 8% 12% / 0.8;
@@ -82,11 +155,6 @@
     --sidebar-accent-foreground: 40 30% 92%;
     --sidebar-border: 30 8% 18%;
     --sidebar-ring: 38 92% 50%;
-  }
-
-  .dark {
-    --background: 30 10% 8%;
-    --foreground: 40 30% 92%;
   }
 }
 

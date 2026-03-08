@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Send, Paperclip, X, Sparkles, Volume2 } from "lucide-react";
+import { Send, Paperclip, X, Sparkles, Volume2, ArrowDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { VoiceButton } from "./VoiceButton";
 import { ChatMessage } from "./ChatMessage";
@@ -31,7 +31,9 @@ export const ConversationCanvas = ({
 }: ConversationCanvasProps) => {
   const [inputValue, setInputValue] = useState("");
   const [isVoiceModeActive, setIsVoiceModeActive] = useState(false);
+  const [isAtBottom, setIsAtBottom] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   
   // Track voice input state to prevent duplication
@@ -77,8 +79,22 @@ export const ConversationCanvas = ({
   const scrollToBottom = () => {
     setTimeout(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+      setIsAtBottom(true);
     }, 0);
   };
+
+  // Detect scroll position
+  const handleScroll = useCallback(() => {
+    if (!messagesContainerRef.current) return;
+    
+    const { scrollTop, scrollHeight, clientHeight } = messagesContainerRef.current;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    
+    console.log("Scroll detected:", { scrollTop, scrollHeight, clientHeight, distanceFromBottom });
+    
+    // Show button if more than 100px from bottom
+    setIsAtBottom(distanceFromBottom < 100);
+  }, []);
 
   useEffect(() => {
     scrollToBottom();
@@ -178,7 +194,11 @@ export const ConversationCanvas = ({
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden p-6 space-y-6 scrollbar-thin">
+      <div 
+        ref={messagesContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto overflow-x-hidden p-6 space-y-6 scrollbar-thin relative"
+      >
         {messages.length === 0 ? (
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -222,6 +242,11 @@ export const ConversationCanvas = ({
                   content={message.content}
                   sources={message.sources}
                   timestamp={message.timestamp}
+                  isSpeaking={isSpeaking && message.role === "assistant"}
+                  messageId={message.id}
+                  onDelete={() => {
+                    setMessages((prev) => prev.filter((m) => m.id !== message.id));
+                  }}
                 />
                 {/* Text to speech button for assistant messages */}
                 {message.role === "assistant" && (
@@ -276,6 +301,27 @@ export const ConversationCanvas = ({
             <div ref={messagesEndRef} />
           </>
         )}
+
+        {/* Scroll to bottom button - positioned absolutely inside container */}
+        <AnimatePresence>
+          {!isAtBottom && messages.length > 0 && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.8 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.8 }}
+              className="absolute bottom-6 right-6 z-10"
+            >
+              <Button
+                onClick={scrollToBottom}
+                size="icon"
+                className="rounded-full shadow-lg bg-primary hover:bg-primary/90 w-12 h-12 flex items-center justify-center"
+                title="Scroll to latest message"
+              >
+                <ArrowDown className="w-5 h-5" />
+              </Button>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Input Area */}

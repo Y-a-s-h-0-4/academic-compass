@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Sidebar } from "@/features/layout/components/Sidebar";
 import { RightPanel } from "@/features/layout/components/RightPanel";
@@ -11,7 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { PanelRight, Plus, BookOpen, Send, Loader2, Play, Pause, SkipBack, SkipForward, Mic, MicOff } from "lucide-react";
+import { PanelRight, Plus, BookOpen, Send, Loader2, Play, Pause, SkipBack, SkipForward, Mic, MicOff, ArrowDown, Sun, Moon } from "lucide-react";
 import UserProfile from "@/components/UserProfile";
 import { useUserContext } from "@/context/UserContext";
 import {
@@ -81,7 +81,8 @@ const Index = () => {
   const [currentAudioUrl, setCurrentAudioUrl] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState("");
-
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const [theme, setTheme] = useState<"light" | "dark">("dark");
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const mainAudioRef = useRef<HTMLAudioElement>(null);
@@ -90,16 +91,57 @@ const Index = () => {
   const voiceTextRef = useRef<string>("");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const currentSourcesRef = useRef<Array<Record<string, any>>>([]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    setIsAtBottom(true);
   };
+
+  const handleScroll = useCallback(() => {
+    if (!messagesContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = messagesContainerRef.current;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    setIsAtBottom(distanceFromBottom < 100);
+  }, []);
+
+  const toggleTheme = () => {
+    setTheme((prev) => {
+      const next = prev === "dark" ? "light" : "dark";
+      document.documentElement.classList.toggle("dark", next === "dark");
+      localStorage.setItem("theme", next);
+      return next;
+    });
+  };
+
+  useEffect(() => {
+    const storedTheme = localStorage.getItem("theme");
+    const initialTheme = storedTheme === "light" || storedTheme === "dark" ? storedTheme : "dark";
+    setTheme(initialTheme);
+    document.documentElement.classList.toggle("dark", initialTheme === "dark");
+  }, []);
 
   useEffect(() => {
     scrollToBottom();
   }, [messages]);
+
+  useEffect(() => {
+    if (activePage !== "home") return;
+    const frame = requestAnimationFrame(() => handleScroll());
+    return () => cancelAnimationFrame(frame);
+  }, [activePage, messages, handleScroll]);
+
+  // Auto-scroll to latest message when going to home page
+  useEffect(() => {
+    if (activePage === "home" && messages.length > 0) {
+      const timer = setTimeout(() => {
+        scrollToBottom();
+      }, 100);
+      return () => clearTimeout(timer);
+    }
+  }, [activePage]);
 
   // Load conversation history on mount
   useEffect(() => {
@@ -486,7 +528,11 @@ const Index = () => {
         <>
           <div className="flex-1 flex flex-col overflow-hidden min-h-0">
             {/* Chat Messages Area - Scrollable */}
-            <div className="flex-1 overflow-y-auto min-h-0">
+            <div 
+              ref={messagesContainerRef}
+              onScroll={handleScroll}
+              className="flex-1 overflow-y-auto min-h-0 relative"
+            >
               <div className="max-w-3xl mx-auto p-6 space-y-6">
                 {messages.length === 0 && (
                   <div className="flex flex-col items-center justify-center min-h-[60vh] text-center py-20">
@@ -554,6 +600,26 @@ const Index = () => {
 
                 <div ref={messagesEndRef} />
               </div>
+
+              {/* Arrow Button to Scroll Down */}
+              <AnimatePresence>
+                {!isAtBottom && messages.length > 0 && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    className="sticky bottom-6 ml-auto mr-6 z-10 w-fit"
+                  >
+                    <Button
+                      onClick={scrollToBottom}
+                      size="icon"
+                      className="rounded-full shadow-lg bg-primary hover:bg-primary/90"
+                    >
+                      <ArrowDown className="w-5 h-5" />
+                    </Button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
 
             {/* Input Area - Fixed at bottom */}
@@ -716,6 +782,14 @@ const Index = () => {
             <p className="text-sm text-muted-foreground">Your guided learning companion</p>
           </div>
           <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              size="icon"
+              aria-label="Toggle theme"
+              onClick={toggleTheme}
+            >
+              {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            </Button>
             <Button
               variant="outline"
               size="sm"

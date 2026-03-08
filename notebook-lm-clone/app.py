@@ -324,7 +324,7 @@ def initialize_pipeline():
         return True
     
     try:
-        openai_key = os.getenv("OPENAI_API_KEY")
+        gemini_key = os.getenv("GEMINI_API_KEY")
         assemblyai_key = os.getenv("ASSEMBLYAI_API_KEY")
         firecrawl_key = os.getenv("FIRECRAWL_API_KEY")
         zep_key = os.getenv("ZEP_API_KEY")
@@ -340,16 +340,16 @@ def initialize_pipeline():
             rag_generator = RAGGenerator(
                 embedding_generator=embedding_generator,
                 vector_db=vector_db,
-                openai_api_key=openai_key
+                gemini_api_key=gemini_key
             )
             
             audio_transcriber = AudioTranscriber(assemblyai_key) if assemblyai_key else None
             youtube_transcriber = YouTubeTranscriber(assemblyai_key) if assemblyai_key else None
             web_scraper = WebScraper(firecrawl_key) if firecrawl_key else None
-            podcast_script_generator = PodcastScriptGenerator(openai_key) if openai_key else None
+            podcast_script_generator = PodcastScriptGenerator(gemini_key) if gemini_key else None
             
             try:
-                podcast_tts_generator = PodcastTTSGenerator() if openai_key else None
+                podcast_tts_generator = PodcastTTSGenerator() if gemini_key else None
                 if podcast_tts_generator:
                     logger.info("PodcastTTSGenerator initialized successfully")
             except ImportError:
