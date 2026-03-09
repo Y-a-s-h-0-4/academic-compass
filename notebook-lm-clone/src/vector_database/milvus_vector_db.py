@@ -118,6 +118,18 @@ class MilvusVectorDB:
             if results and results['ids'] and len(results['ids']) > 0:
                 for i in range(len(results['ids'][0])):
                     metadata = results['metadatas'][0][i]
+                    page_number = metadata.get('page_number')
+                    if isinstance(page_number, (int, float)) and page_number <= 0:
+                        page_number = None
+
+                    start_char = metadata.get('start_char')
+                    if isinstance(start_char, (int, float)) and start_char < 0:
+                        start_char = None
+
+                    end_char = metadata.get('end_char')
+                    if isinstance(end_char, (int, float)) and end_char < 0:
+                        end_char = None
+
                     formatted_result = {
                         'id': results['ids'][0][i],
                         'score': 1 - results['distances'][0][i],  # Convert distance to similarity
@@ -125,10 +137,10 @@ class MilvusVectorDB:
                         'citation': {
                             'source_file': metadata.get('source_file', ''),
                             'source_type': metadata.get('source_type', 'unknown'),
-                            'page_number': metadata.get('page_number'),
+                            'page_number': page_number,
                             'chunk_index': metadata.get('chunk_index', 0),
-                            'start_char': metadata.get('start_char'),
-                            'end_char': metadata.get('end_char'),
+                            'start_char': start_char,
+                            'end_char': end_char,
                         },
                         'metadata': json.loads(metadata.get('metadata', '{}')),
                         'embedding_model': metadata.get('embedding_model', 'unknown')

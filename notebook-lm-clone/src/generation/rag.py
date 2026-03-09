@@ -38,23 +38,50 @@ class RAGGenerator:
         self,
         embedding_generator: EmbeddingGenerator,
         vector_db: MilvusVectorDB,
-        gemini_api_key: str,
-        model_name: str = "gemini-2.5-flash",
+        openai_api_key: Optional[str] = None,
+        gemini_api_key: Optional[str] = None,
+        model_name: Optional[str] = None,
+        provider: Optional[str] = None,
         temperature: float = 0.1,
         max_tokens: int = 2000
     ):
         self.embedding_generator = embedding_generator
         self.vector_db = vector_db
+
+        selected_provider = (provider or "").strip().lower()
+        if selected_provider in {"google", "gemini"}:
+            selected_provider = "gemini"
+
+        if not selected_provider:
+            if gemini_api_key:
+                selected_provider = "gemini"
+            elif openai_api_key:
+                selected_provider = "openai"
+
+        if selected_provider not in {"openai", "gemini"}:
+            raise ValueError("No supported LLM provider configured. Set GEMINI_API_KEY or OPENAI_API_KEY.")
+
+        if selected_provider == "gemini" and not gemini_api_key:
+            raise ValueError("GEMINI_API_KEY is required when provider is gemini.")
+        if selected_provider == "openai" and not openai_api_key:
+            raise ValueError("OPENAI_API_KEY is required when provider is openai.")
+
+        if model_name is None:
+            model_name = "gemini-2.5-flash" if selected_provider == "gemini" else "gpt-4o-mini"
+
+        model = model_name if "/" in model_name else f"{selected_provider}/{model_name}"
+        api_key = gemini_api_key if selected_provider == "gemini" else openai_api_key
         
         self.llm = LLM(
-            model=f"gemini/{model_name}",
+            model=model,
             temperature=temperature,
             max_tokens=max_tokens,
-            api_key=gemini_api_key
+            api_key=api_key
         )
         
+        self.provider = selected_provider
         self.model_name = model_name
-        logger.info(f"RAG Generator initialized with {model_name}")
+        logger.info(f"RAG Generator initialized with provider={selected_provider}, model={model}")
     
     def generate_response(
         self,
@@ -133,6 +160,7 @@ class RAGGenerator:
         total_chars = 0
         for i, result in enumerate(search_results[:max_chunks]):
             citation_info = result['citation']
+            result_metadata = result.get('metadata') or {}
             source_file = citation_info.get('source_file', 'Unknown Source')
             source_type = citation_info.get('source_type', 'unknown')
             page_number = citation_info.get('page_number')
@@ -155,6 +183,20 @@ class RAGGenerator:
                 'chunk_id': result['id'],
                 'relevance_score': result['score']
             }
+
+            asset_type = result_metadata.get('asset_type')
+            if asset_type in {'image', 'table'}:
+                source_info['asset_type'] = asset_type
+                source_info['asset_url'] = result_metadata.get('asset_url')
+                source_info['asset_name'] = result_metadata.get('asset_name')
+
+            if asset_type == 'table' and result_metadata.get('table_preview'):
+                source_info['table_preview'] = result_metadata.get('table_preview')
+
+            if asset_type == 'image':
+                source_info['image_width'] = result_metadata.get('image_width')
+                source_info['image_height'] = result_metadata.get('image_height')
+
             sources_info.append(source_info)
         
         formatted_context = '\n\n'.join(context_parts)
@@ -248,6 +290,234 @@ Please provide a well-structured summary with proper citations:"""
                 retrieval_count=0
             )
 
+    def generate_quiz(
+        self,
+        num_questions: int = 5,
+        max_chunks: int = 12,
+    ) -> RAGResult:
+        try:
+            query_vector = self.embedding_generator.generate_query_embedding(
+                "key concepts definitions important facts exam topics"
+            )
+            search_results = self.vector_db.search(
+                query_vector=query_vector.tolist(), limit=max_chunks
+            )
+            if not search_results:
+                return RAGResult(
+                    query="Quiz", response="No documents available.", sources_used=[], retrieval_count=0
+                )
+            context, sources_info = self._format_context_with_citations(search_results, max_chunks, 6000)
+            prompt = f"""Generate exactly {num_questions} multiple-choice questions from the following study material.
+
+Return ONLY valid JSON — no markdown, no explanation, no extra text.
+
+Format:
+[
+  {{
+    "question": "...",
+    "options": [
+      {{"id": "a", "text": "...", "isCorrect": false}},
+      {{"id": "b", "text": "...", "isCorrect": true}},
+      {{"id": "c", "text": "...", "isCorrect": false}},
+      {{"id": "d", "text": "...", "isCorrect": false}}
+    ],
+    "explanation": "Brief explanation of the correct answer"
+  }}
+]
+
+STUDY MATERIAL:
+{context}"""
+            response = self.llm.call(prompt)
+            return RAGResult(query="Quiz", response=response, sources_used=sources_info, retrieval_count=len(search_results))
+        except Exception as e:
+            logger.error(f"Error generating quiz: {e}")
+            return RAGResult(query="Quiz", response=f"Error: {e}", sources_used=[], retrieval_count=0)
+
+    def generate_flashcards(
+        self,
+        num_cards: int = 10,
+        max_chunks: int = 12,
+    ) -> RAGResult:
+        try:
+            query_vector = self.embedding_generator.generate_query_embedding(
+                "definitions concepts terms important facts explanations"
+            )
+            search_results = self.vector_db.search(
+                query_vector=query_vector.tolist(), limit=max_chunks
+            )
+            if not search_results:
+                return RAGResult(
+                    query="Flashcards", response="No documents available.", sources_used=[], retrieval_count=0
+                )
+            context, sources_info = self._format_context_with_citations(search_results, max_chunks, 6000)
+            prompt = f"""Generate exactly {num_cards} flashcards from the study material below.
+
+Return ONLY valid JSON — no markdown, no explanation, no extra text.
+
+Format:
+[
+  {{"front": "Question or term", "back": "Answer or definition"}}
+]
+
+STUDY MATERIAL:
+{context}"""
+            response = self.llm.call(prompt)
+            return RAGResult(query="Flashcards", response=response, sources_used=sources_info, retrieval_count=len(search_results))
+        except Exception as e:
+            logger.error(f"Error generating flashcards: {e}")
+            return RAGResult(query="Flashcards", response=f"Error: {e}", sources_used=[], retrieval_count=0)
+
+    def generate_mindmap(
+        self,
+        max_chunks: int = 12,
+        topic: Optional[str] = None,
+        difficulty_level: str = "Intermediate",
+        learning_objective: Optional[str] = None,
+    ) -> RAGResult:
+        try:
+            topic_label = (topic or "Retrieved Course Topic").strip() or "Retrieved Course Topic"
+            objective_label = (
+                (learning_objective or "Understand key concepts, dependencies, and applications from the retrieved material.").strip()
+                or "Understand key concepts, dependencies, and applications from the retrieved material."
+            )
+            difficulty_label = (difficulty_level or "Intermediate").strip() or "Intermediate"
+
+            query_vector = self.embedding_generator.generate_query_embedding(
+                f"{topic_label} {objective_label} main topics subtopics hierarchy structure prerequisites relationships examples formulas"
+            )
+            search_results = self.vector_db.search(
+                query_vector=query_vector.tolist(), limit=max_chunks
+            )
+            if not search_results:
+                return RAGResult(
+                    query="Mind Map", response="No documents available.", sources_used=[], retrieval_count=0
+                )
+            context, sources_info = self._format_context_with_citations(search_results, max_chunks, 6000)
+            prompt = f"""You are a mind map generation expert for an educational RAG system.
+Generate comprehensive, well-structured mind maps that transform academic content into visual, hierarchical knowledge structures optimized for student learning.
+
+INPUTS:
+- Topic/Title: {topic_label}
+- Source Content: RAG-retrieved material below with citations [1], [2], ...
+- Difficulty Level: {difficulty_label}
+- Learning Objective: {objective_label}
+
+STRICT REQUIREMENTS:
+1) Use ONLY facts grounded in the provided source content. No hallucinations.
+2) Use domain-accurate terminology from the sources.
+3) Hierarchy depth must be 3-4 levels maximum.
+4) Central node + 4-7 primary branches.
+5) Each primary branch has 2-4 sub-branches.
+6) Node labels must be short phrases (1-3 words).
+7) Include prerequisites, quiz anchors, revision hooks, and labeled relationships.
+8) Include 1-2 real-world applications.
+9) Include formulas/equations when relevant.
+10) Ensure balance and logical progression from foundational to advanced.
+
+OUTPUT FORMAT:
+Return ONLY valid JSON (no markdown, no prose outside JSON) with this exact top-level structure:
+{{
+    "mindmap": {{
+        "title": "...",
+        "difficulty_level": "Basic|Intermediate|Advanced",
+        "learning_objective": "...",
+        "central_node": {{
+            "text": "...",
+            "description": "...",
+            "source_refs": ["[1]"]
+        }},
+        "branches": [
+            {{
+                "id": "branch-1",
+                "level": 2,
+                "text": "...",
+                "description": "...",
+                "source_refs": ["[1]", "[2]"],
+                "sub_branches": [
+                    {{
+                        "id": "branch-1-sub-1",
+                        "level": 3,
+                        "text": "...",
+                        "details": "...",
+                        "source_refs": ["[2]"],
+                        "connections": [
+                            {{ "to": "branch-2-sub-1", "relationship": "depends-on" }}
+                        ],
+                        "leaf_nodes": [
+                            {{
+                                "id": "branch-1-sub-1-leaf-1",
+                                "level": 4,
+                                "text": "...",
+                                "details": "...",
+                                "source_refs": ["[3]"]
+                            }}
+                        ]
+                    }}
+                ]
+            }}
+        ],
+        "learning_notes": {{
+            "prerequisites": ["..."],
+            "quiz_anchors": ["..."],
+            "revision_hooks": ["..."],
+            "key_relationships": ["A -> B (depends-on)"]
+        }},
+        "validation_checklist": {{
+            "all_information_sourced": true,
+            "no_contradictions": true,
+            "central_topic_clear": true,
+            "primary_branch_count_valid": true,
+            "short_node_labels": true,
+            "real_world_examples_included": true,
+            "learning_objectives_addressed": true,
+            "prerequisites_identified": true,
+            "relationships_labeled": true,
+            "depth_within_limits": true,
+            "terminology_matches_sources": true
+        }},
+        "evaluation_metrics": {{
+            "accuracy": 0,
+            "completeness": 0,
+            "clarity": 0,
+            "structure": 0,
+            "usability": 0
+        }}
+    }},
+    "mermaid": "mindmap\\n  root((Topic))\\n    BranchA\\n      SubA",
+    "ascii": "Topic\\n|- Branch A\\n|  |- Sub A",
+    "render_tree": {{
+        "id": "root",
+        "label": "...",
+        "children": [
+            {{
+                "id": "branch-1",
+                "label": "...",
+                "children": [
+                    {{ "id": "branch-1-sub-1", "label": "...", "children": [] }}
+                ]
+            }}
+        ]
+    }}
+}}
+
+VALIDATION TARGETS:
+- 4-7 primary branches
+- 2-4 sub-branches per primary branch
+- 1-3 words per node label
+- 3-4 depth levels maximum
+- include source_refs for factual nodes
+- include at least 2 real-world applications when supported by sources
+
+SOURCE MATERIAL (use citations exactly as provided):
+{context}
+
+Generate the JSON now."""
+            response = self.llm.call(prompt)
+            return RAGResult(query="Mind Map", response=response, sources_used=sources_info, retrieval_count=len(search_results))
+        except Exception as e:
+            logger.error(f"Error generating mindmap: {e}")
+            return RAGResult(query="Mind Map", response=f"Error: {e}", sources_used=[], retrieval_count=0)
+
 
 if __name__ == "__main__":
     import os
@@ -256,8 +526,9 @@ if __name__ == "__main__":
     from src.vector_database.milvus_vector_db import MilvusVectorDB
     
     openai_key = os.getenv("OPENAI_API_KEY")
-    if not openai_key:
-        print("Please set OPENAI_API_KEY environment variable")
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if not openai_key and not gemini_key:
+        print("Please set GEMINI_API_KEY or OPENAI_API_KEY environment variable")
         exit(1)
     
     try:
@@ -267,7 +538,7 @@ if __name__ == "__main__":
             embedding_generator=embedding_gen,
             vector_db=vector_db,
             openai_api_key=openai_key,
-            model_name="gpt-4o-mini",
+            gemini_api_key=gemini_key,
             temperature=0.1
         )
         

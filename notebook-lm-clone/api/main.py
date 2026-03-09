@@ -3,6 +3,7 @@ import re
 import tempfile
 import uuid
 import json
+import hashlib
 import logging
 import asyncio
 from pathlib import Path
@@ -36,14 +37,17 @@ app = FastAPI(title="NotebookLM API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["*"]
-    ,
+    allow_credentials=True,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
 DB_URL = os.getenv("SUPABASE_DB_URL") or os.getenv("SUPABASE_POSTGRES_URL") or os.getenv("DATABASE_URL")
+LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or "").strip().lower() or None
+LLM_MODEL = (os.getenv("LLM_MODEL") or "").strip() or None
 
 logger.info(f"Environment loaded - DB_URL present: {bool(DB_URL)}")
 
@@ -56,13 +60,30 @@ for folder in (UPLOAD_DIR, OUTPUT_DIR, CACHE_DIR):
 # Mount static files directory for audio/podcast outputs (after OUTPUT_DIR is defined)
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 
-# In-memory fallback registry keyed by user_id when DB unavailable
-sources_registry: Dict[str, List[dict]] = {}
+# In-memory fallback registry keyed by user_id -> chat_id when DB unavailable
+sources_registry: Dict[str, Dict[str, List[dict]]] = {}
 
 
 def sanitize_collection_name(value: str) -> str:
     safe = re.sub(r"[^a-zA-Z0-9_]", "_", value or "default")
     return safe[:48] or "default"
+
+
+def normalize_chat_id(chat_id: Optional[str]) -> str:
+    value = (chat_id or "").strip()
+    return value or "default"
+
+
+def build_pipeline_identity(user_id: str, chat_id: str) -> str:
+    safe_user = sanitize_collection_name(user_id)[:20]
+    safe_chat = sanitize_collection_name(chat_id)[:20]
+    digest = hashlib.sha1(f"{user_id}:{chat_id}".encode("utf-8")).hexdigest()[:10]
+    return f"{safe_user}_{safe_chat}_{digest}"
+
+
+def get_memory_sources_bucket(user_id: str, chat_id: str) -> List[dict]:
+    user_bucket = sources_registry.setdefault(user_id, {})
+    return user_bucket.setdefault(chat_id, [])
 
 
 def get_db_connection():
@@ -71,8 +92,8 @@ def get_db_connection():
         return None
     try:
         return psycopg2.connect(DB_URL, sslmode="require")
-    except (psycopg2.OperationalError, psycopg2.DatabaseError) as e:
-        logger.warning(f"Database connection failed: {e}; falling back to in-memory registry")
+    except Exception as e:
+        logger.error(f"Database connection failed; falling back to in-memory registry: {e}")
         return None
 
 
@@ -90,6 +111,7 @@ def ensure_sources_table():
                     CREATE TABLE IF NOT EXISTS notebooklm_sources (
                         id UUID PRIMARY KEY,
                         user_id TEXT NOT NULL,
+                        chat_id TEXT NOT NULL DEFAULT 'default',
                         name TEXT,
                         path TEXT,
                         type TEXT,
@@ -98,19 +120,41 @@ def ensure_sources_table():
                     );
                     """
                 )
+                # Backward-compatible migration for existing tables.
+                cur.execute("ALTER TABLE notebooklm_sources ADD COLUMN IF NOT EXISTS chat_id TEXT;")
+                cur.execute(
+                    "UPDATE notebooklm_sources SET chat_id = 'default' WHERE chat_id IS NULL OR chat_id = '';"
+                )
+                cur.execute("ALTER TABLE notebooklm_sources ALTER COLUMN chat_id SET DEFAULT 'default';")
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_sources_user_chat_time
+                    ON notebooklm_sources(user_id, chat_id, created_at DESC);
+                    """
+                )
                 # Create conversation history table
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS conversation_history (
                         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                         user_id TEXT NOT NULL,
+                        chat_id TEXT NOT NULL DEFAULT 'default',
                         role TEXT NOT NULL,
                         content TEXT NOT NULL,
                         sources JSONB,
                         created_at TIMESTAMPTZ DEFAULT NOW()
                     );
-                    CREATE INDEX IF NOT EXISTS idx_conversation_user_time 
-                    ON conversation_history(user_id, created_at DESC);
+                    """
+                )
+                cur.execute("ALTER TABLE conversation_history ADD COLUMN IF NOT EXISTS chat_id TEXT;")
+                cur.execute(
+                    "UPDATE conversation_history SET chat_id = 'default' WHERE chat_id IS NULL OR chat_id = '';"
+                )
+                cur.execute("ALTER TABLE conversation_history ALTER COLUMN chat_id SET DEFAULT 'default';")
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_conversation_user_chat_time
+                    ON conversation_history(user_id, chat_id, created_at DESC);
                     """
                 )
         conn.close()
@@ -121,68 +165,102 @@ def ensure_sources_table():
 
 
 def save_source_record(source: dict):
+    chat_id = normalize_chat_id(source.get("chat_id"))
     conn = get_db_connection()
     if not conn:
         # Fallback to in-memory cache
-        user_bucket = sources_registry.setdefault(source["user_id"], [])
-        user_bucket.append(source)
+        get_memory_sources_bucket(source["user_id"], chat_id).append({**source, "chat_id": chat_id})
         return
-    with conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO notebooklm_sources (id, user_id, name, path, type, chunks)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (id) DO UPDATE SET
-                    user_id = EXCLUDED.user_id,
-                    name = EXCLUDED.name,
-                    path = EXCLUDED.path,
-                    type = EXCLUDED.type,
-                    chunks = EXCLUDED.chunks;
-                """,
-                (
-                    source["id"],
-                    source["user_id"],
-                    source.get("name"),
-                    source.get("path"),
-                    source.get("type"),
-                    source.get("chunks", 0),
-                ),
-            )
-    conn.close()
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO notebooklm_sources (id, user_id, chat_id, name, path, type, chunks)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        user_id = EXCLUDED.user_id,
+                        chat_id = EXCLUDED.chat_id,
+                        name = EXCLUDED.name,
+                        path = EXCLUDED.path,
+                        type = EXCLUDED.type,
+                        chunks = EXCLUDED.chunks;
+                    """,
+                    (
+                        source["id"],
+                        source["user_id"],
+                        chat_id,
+                        source.get("name"),
+                        source.get("path"),
+                        source.get("type"),
+                        source.get("chunks", 0),
+                    ),
+                )
+    except Exception as e:
+        logger.error(f"Failed to save source in DB; using in-memory fallback: {e}")
+        get_memory_sources_bucket(source["user_id"], chat_id).append({**source, "chat_id": chat_id})
+    finally:
+        conn.close()
 
 
-def fetch_sources_for_user(user_id: str) -> List[dict]:
+def fetch_sources_for_user(user_id: str, chat_id: Optional[str]) -> List[dict]:
+    chat_scope = normalize_chat_id(chat_id)
     conn = get_db_connection()
     if not conn:
-        return sources_registry.get(user_id, [])
-    with conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(
-                "SELECT id, user_id, name, path, type, chunks, created_at FROM notebooklm_sources WHERE user_id = %s ORDER BY created_at DESC",
-                (user_id,),
-            )
-            rows = cur.fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
+        return get_memory_sources_bucket(user_id, chat_scope)
+
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, user_id, chat_id, name, path, type, chunks, created_at
+                    FROM notebooklm_sources
+                    WHERE user_id = %s AND chat_id = %s
+                    ORDER BY created_at DESC
+                    """,
+                    (user_id, chat_scope),
+                )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        logger.error(f"Failed to fetch sources from DB; using in-memory fallback: {e}")
+        return get_memory_sources_bucket(user_id, chat_scope)
+    finally:
+        conn.close()
 
 
 class QueryRequest(BaseModel):
     query: str
     top_k: int = 8
     user_id: str
+    chat_id: str = "default"
 
 
 class SummaryRequest(BaseModel):
     max_chunks: int = 12
     summary_length: str = "medium"
     user_id: str
+    chat_id: str = "default"
 
 
 class PodcastRequest(BaseModel):
     query: str
     source_path: Optional[str] = None
     user_id: str
+    chat_id: str = "default"
+
+
+class LearningAidRequest(BaseModel):
+    user_id: str
+    chat_id: str = "default"
+    topic: Optional[str] = None
+    difficulty_level: str = "Intermediate"
+    learning_objective: Optional[str] = None
+    num_questions: int = 5
+    num_cards: int = 10
+    max_chunks: int = 12
 
 
 # Shared components and per-user pipelines
@@ -195,16 +273,19 @@ user_pipelines: Dict[str, Dict[str, object]] = {}
 ensure_sources_table()
 
 
-def get_user_pipeline(user_id: str) -> Dict[str, object]:
+def get_user_pipeline(user_id: str, chat_id: Optional[str] = None) -> Dict[str, object]:
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id is required")
 
-    if user_id in user_pipelines:
-        return user_pipelines[user_id]
+    chat_scope = normalize_chat_id(chat_id)
+    pipeline_key = f"{user_id}::{chat_scope}"
 
-    safe_id = sanitize_collection_name(user_id)
-    collection_name = f"notebook_lm_{safe_id}"
-    db_path = CACHE_DIR / f"milvus_{safe_id}.db"
+    if pipeline_key in user_pipelines:
+        return user_pipelines[pipeline_key]
+
+    identity = build_pipeline_identity(user_id, chat_scope)
+    collection_name = f"notebook_lm_{identity}"
+    db_path = CACHE_DIR / f"milvus_{identity}.db"
 
     vector_db = MilvusVectorDB(
         db_path=str(db_path),
@@ -214,14 +295,17 @@ def get_user_pipeline(user_id: str) -> Dict[str, object]:
     rag_generator = RAGGenerator(
         embedding_generator=embedding_generator,
         vector_db=vector_db,
-        gemini_api_key=GEMINI_API_KEY,
+        openai_api_key=OPENAI_API_KEY or None,
+        gemini_api_key=GEMINI_API_KEY or None,
+        provider=LLM_PROVIDER,
+        model_name=LLM_MODEL,
     )
 
-    user_pipelines[user_id] = {
+    user_pipelines[pipeline_key] = {
         "vector_db": vector_db,
         "rag_generator": rag_generator,
     }
-    return user_pipelines[user_id]
+    return user_pipelines[pipeline_key]
 
 
 @app.get("/health")
@@ -234,11 +318,13 @@ async def ingest(
     files: Optional[List[UploadFile]] = File(default=None),
     web_url: Optional[str] = Form(default=None),
     user_id: str = Form(...),
+    chat_id: str = Form("default"),
 ):
     if not files and not web_url:
         raise HTTPException(status_code=400, detail="Provide files or web_url")
 
-    user_pipeline = get_user_pipeline(user_id)
+    chat_scope = normalize_chat_id(chat_id)
+    user_pipeline = get_user_pipeline(user_id, chat_scope)
 
     ingested = []
     try:
@@ -250,13 +336,14 @@ async def ingest(
                     content = await file.read()
                     tmp.write(content)
                     tmp_path = Path(tmp.name)
-                chunks = doc_processor.process_document(str(tmp_path))
+                chunks = doc_processor.process_document(str(tmp_path), source_name=file.filename)
                 embeddings = embedding_generator.generate_embeddings(chunks)
                 user_pipeline["vector_db"].insert_embeddings(embeddings)
                 source_id = str(uuid.uuid4())
                 source_record = {
                     "id": source_id,
                     "user_id": user_id,
+                    "chat_id": chat_scope,
                     "name": file.filename,
                     "path": str(tmp_path),
                     "type": suffix.lstrip("."),
@@ -276,6 +363,7 @@ async def ingest(
             source_record = {
                 "id": source_id,
                 "user_id": user_id,
+                "chat_id": chat_scope,
                 "name": web_url,
                 "path": web_url,
                 "type": "web",
@@ -291,14 +379,14 @@ async def ingest(
 
 
 @app.get("/api/sources")
-def list_sources(user_id: str):
-    sources = fetch_sources_for_user(user_id)
+def list_sources(user_id: str, chat_id: str = "default"):
+    sources = fetch_sources_for_user(user_id, chat_id)
     return {"sources": sources}
 
 
 @app.post("/api/query")
 def query_rag(req: QueryRequest):
-    user_pipeline = get_user_pipeline(req.user_id)
+    user_pipeline = get_user_pipeline(req.user_id, req.chat_id)
     result = user_pipeline["rag_generator"].generate_response(
         query=req.query,
         top_k=req.top_k,
@@ -315,14 +403,14 @@ async def query_stream(req: QueryRequest):
     """
     Streaming version: sends text character by character for typewriter effect with TTS
     """
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=400, detail="Gemini API key not configured")
+    if not OPENAI_API_KEY and not GEMINI_API_KEY:
+        raise HTTPException(status_code=400, detail="No LLM key configured. Set GEMINI_API_KEY or OPENAI_API_KEY")
 
     logger.info(f"Query streaming request: {req.query[:50]}..., user: {req.user_id}")
     
     try:
         # Get user pipeline for RAG
-        user_pipeline = get_user_pipeline(req.user_id)
+        user_pipeline = get_user_pipeline(req.user_id, req.chat_id)
         
         # Generate RAG response
         rag_result = user_pipeline["rag_generator"].generate_response(
@@ -398,7 +486,7 @@ async def query_stream(req: QueryRequest):
 
 @app.post("/api/summary")
 def summary(req: SummaryRequest):
-    user_pipeline = get_user_pipeline(req.user_id)
+    user_pipeline = get_user_pipeline(req.user_id, req.chat_id)
     result = user_pipeline["rag_generator"].generate_summary(
         max_chunks=req.max_chunks,
         summary_length=req.summary_length,
@@ -410,11 +498,82 @@ def summary(req: SummaryRequest):
     }
 
 
+def _clean_llm_json(raw: str) -> str:
+    """Strip markdown code fences and whitespace from LLM JSON output."""
+    text = raw.strip()
+    # Remove ```json ... ``` or ``` ... ```
+    text = re.sub(r'^```(?:json)?\s*', '', text)
+    text = re.sub(r'\s*```$', '', text)
+    return text.strip()
+
+
+@app.post("/api/generate/quiz")
+def generate_quiz(req: LearningAidRequest):
+    user_pipeline = get_user_pipeline(req.user_id, req.chat_id)
+    result = user_pipeline["rag_generator"].generate_quiz(
+        num_questions=req.num_questions,
+        max_chunks=req.max_chunks,
+    )
+    cleaned = _clean_llm_json(result.response)
+    return {
+        "content": cleaned,
+        "sources": result.sources_used,
+        "retrieval_count": result.retrieval_count,
+    }
+
+
+@app.post("/api/generate/flashcards")
+def generate_flashcards(req: LearningAidRequest):
+    user_pipeline = get_user_pipeline(req.user_id, req.chat_id)
+    result = user_pipeline["rag_generator"].generate_flashcards(
+        num_cards=req.num_cards,
+        max_chunks=req.max_chunks,
+    )
+    cleaned = _clean_llm_json(result.response)
+    return {
+        "content": cleaned,
+        "sources": result.sources_used,
+        "retrieval_count": result.retrieval_count,
+    }
+
+
+@app.post("/api/generate/mindmap")
+def generate_mindmap(req: LearningAidRequest):
+    user_pipeline = get_user_pipeline(req.user_id, req.chat_id)
+    result = user_pipeline["rag_generator"].generate_mindmap(
+        max_chunks=req.max_chunks,
+        topic=req.topic,
+        difficulty_level=req.difficulty_level,
+        learning_objective=req.learning_objective,
+    )
+    cleaned = _clean_llm_json(result.response)
+    return {
+        "content": cleaned,
+        "sources": result.sources_used,
+        "retrieval_count": result.retrieval_count,
+    }
+
+
+@app.post("/api/generate/summary")
+def generate_summary_aid(req: LearningAidRequest):
+    user_pipeline = get_user_pipeline(req.user_id, req.chat_id)
+    result = user_pipeline["rag_generator"].generate_summary(
+        max_chunks=req.max_chunks,
+        summary_length="medium",
+    )
+    return {
+        "content": result.response,
+        "sources": result.sources_used,
+        "retrieval_count": result.retrieval_count,
+    }
+
+
 
 
 # Conversation History Endpoints
 class ConversationMessage(BaseModel):
     user_id: str
+    chat_id: str = "default"
     role: str  # "user" or "assistant"
     content: str
     sources: Optional[List[dict]] = None
@@ -427,17 +586,20 @@ def save_conversation_message(msg: ConversationMessage):
     if not conn:
         return {"status": "error", "message": "Database unavailable"}
     
+    chat_scope = normalize_chat_id(msg.chat_id)
+
     try:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO conversation_history (user_id, role, content, sources)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO conversation_history (user_id, chat_id, role, content, sources)
+                    VALUES (%s, %s, %s, %s, %s)
                     RETURNING id, created_at;
                     """,
                     (
                         msg.user_id,
+                        chat_scope,
                         msg.role,
                         msg.content,
                         json.dumps(msg.sources) if msg.sources else None,
@@ -457,11 +619,13 @@ def save_conversation_message(msg: ConversationMessage):
 
 
 @app.get("/api/conversations/{user_id}")
-def get_conversation_history(user_id: str, limit: int = 100):
+def get_conversation_history(user_id: str, chat_id: str = "default", limit: int = 100):
     """Retrieve conversation history for a user."""
     conn = get_db_connection()
     if not conn:
         return []
+
+    chat_scope = normalize_chat_id(chat_id)
     
     try:
         with conn:
@@ -470,11 +634,11 @@ def get_conversation_history(user_id: str, limit: int = 100):
                     """
                     SELECT id, role, content, sources, created_at
                     FROM conversation_history
-                    WHERE user_id = %s
+                    WHERE user_id = %s AND chat_id = %s
                     ORDER BY created_at ASC
                     LIMIT %s;
                     """,
-                    (user_id, limit),
+                    (user_id, chat_scope, limit),
                 )
                 rows = cur.fetchall()
                 return [
@@ -495,32 +659,58 @@ def get_conversation_history(user_id: str, limit: int = 100):
 
 
 @app.delete("/api/conversations/{user_id}")
-def delete_conversation_history(user_id: str, older_than_days: Optional[int] = None):
+def delete_conversation_history(
+    user_id: str,
+    chat_id: Optional[str] = None,
+    older_than_days: Optional[int] = None,
+):
     """Delete conversation history for a user. Optionally delete messages older than N days."""
     conn = get_db_connection()
     if not conn:
         return {"status": "error", "message": "Database unavailable"}
+
+    chat_scope = normalize_chat_id(chat_id) if chat_id else None
     
     try:
         with conn:
             with conn.cursor() as cur:
                 if older_than_days:
-                    cur.execute(
-                        """
-                        DELETE FROM conversation_history
-                        WHERE user_id = %s
-                        AND created_at < NOW() - INTERVAL '%s days';
-                        """,
-                        (user_id, older_than_days),
-                    )
+                    if chat_scope:
+                        cur.execute(
+                            """
+                            DELETE FROM conversation_history
+                            WHERE user_id = %s
+                            AND chat_id = %s
+                            AND created_at < NOW() - INTERVAL '%s days';
+                            """,
+                            (user_id, chat_scope, older_than_days),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            DELETE FROM conversation_history
+                            WHERE user_id = %s
+                            AND created_at < NOW() - INTERVAL '%s days';
+                            """,
+                            (user_id, older_than_days),
+                        )
                 else:
-                    cur.execute(
-                        """
-                        DELETE FROM conversation_history
-                        WHERE user_id = %s;
-                        """,
-                        (user_id,),
-                    )
+                    if chat_scope:
+                        cur.execute(
+                            """
+                            DELETE FROM conversation_history
+                            WHERE user_id = %s AND chat_id = %s;
+                            """,
+                            (user_id, chat_scope),
+                        )
+                    else:
+                        cur.execute(
+                            """
+                            DELETE FROM conversation_history
+                            WHERE user_id = %s;
+                            """,
+                            (user_id,),
+                        )
                 deleted_count = cur.rowcount
                 return {
                     "status": "success",
