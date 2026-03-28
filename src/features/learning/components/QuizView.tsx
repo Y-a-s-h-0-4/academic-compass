@@ -17,9 +17,10 @@ interface QuizQuestion {
 
 interface QuizViewProps {
   questions: QuizQuestion[];
+  onComplete?: (result: { totalQuestions: number; correctAnswers: number; scorePercent: number; feedback: string }) => void;
 }
 
-export const QuizView = ({ questions }: QuizViewProps) => {
+export const QuizView = ({ questions, onComplete }: QuizViewProps) => {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [answered, setAnswered] = useState(false);
@@ -49,6 +50,24 @@ export const QuizView = ({ questions }: QuizViewProps) => {
       setSelectedId(null);
       setAnswered(false);
     } else {
+      const finalPercent = Math.round((score / questions.length) * 100);
+      const feedback =
+        finalPercent === 100
+          ? "Perfect mastery of this quiz topic."
+          : finalPercent >= 85
+          ? "Excellent understanding with only minor gaps."
+          : finalPercent >= 70
+          ? "Good progress. Review a few weak areas to improve further."
+          : finalPercent >= 50
+          ? "Developing understanding. Revise key concepts and retry."
+          : "Foundational gaps detected. Revisit this course section before the next attempt.";
+
+      onComplete?.({
+        totalQuestions: questions.length,
+        correctAnswers: score,
+        scorePercent: finalPercent,
+        feedback,
+      });
       setFinished(true);
     }
   };

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useUserContext } from "@/context/UserContext";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -27,6 +27,7 @@ import {
   Save,
   X,
 } from "lucide-react";
+import { getLearningScoreSummary, type LearningScoreSummary } from "@/lib/notebookApi";
 
 const Profile: React.FC = () => {
   const navigate = useNavigate();
@@ -34,6 +35,9 @@ const Profile: React.FC = () => {
     useUserContext();
   const [isEditing, setIsEditing] = useState(false);
   const [showLogoutDialog, setShowLogoutDialog] = useState(false);
+  const [learningSummary, setLearningSummary] = useState<LearningScoreSummary | null>(null);
+  const [learningLoading, setLearningLoading] = useState(false);
+  const [learningError, setLearningError] = useState<string | null>(null);
   const [formData, setFormData] = useState({
     firstName: firstName || "",
     lastName: lastName || "",
@@ -43,6 +47,28 @@ const Profile: React.FC = () => {
   });
 
   const initials = `${firstName?.[0] || ""}${lastName?.[0] || ""}`.toUpperCase();
+
+  useEffect(() => {
+    if (!userId) {
+      setLearningSummary(null);
+      return;
+    }
+
+    const loadLearningSummary = async () => {
+      setLearningLoading(true);
+      setLearningError(null);
+      try {
+        const summary = await getLearningScoreSummary(userId);
+        setLearningSummary(summary);
+      } catch (err: any) {
+        setLearningError(err?.message || "Failed to load learning progress.");
+      } finally {
+        setLearningLoading(false);
+      }
+    };
+
+    loadLearningSummary();
+  }, [userId]);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
@@ -280,29 +306,46 @@ const Profile: React.FC = () => {
                       <h3 className="font-semibold text-foreground mb-4">
                         Learning Statistics
                       </h3>
+
+                      {learningLoading && (
+                        <p className="text-sm text-muted-foreground">Loading learning progress...</p>
+                      )}
+
+                      {learningError && (
+                        <p className="text-sm text-destructive">{learningError}</p>
+                      )}
+
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                         <div className="bg-card rounded-lg p-4 text-center border border-border">
-                          <p className="text-3xl font-bold text-primary">0</p>
+                          <p className="text-3xl font-bold text-primary">
+                            {learningSummary?.overall.total_courses ?? 0}
+                          </p>
                           <p className="text-sm text-muted-foreground mt-2">
-                            Courses Completed
+                            Courses Assessed
                           </p>
                         </div>
                         <div className="bg-card rounded-lg p-4 text-center border border-border">
-                          <p className="text-3xl font-bold text-green-600 dark:text-green-400">0</p>
+                          <p className="text-3xl font-bold text-green-600 dark:text-green-400">
+                            {Math.round(learningSummary?.overall.average_score ?? 0)}%
+                          </p>
                           <p className="text-sm text-muted-foreground mt-2">
-                            Learning Hours
+                            Avg Score
                           </p>
                         </div>
                         <div className="bg-card rounded-lg p-4 text-center border border-border">
-                          <p className="text-3xl font-bold text-purple-600 dark:text-purple-400">0</p>
+                          <p className="text-3xl font-bold text-purple-600 dark:text-purple-400">
+                            {learningSummary?.overall.total_attempts ?? 0}
+                          </p>
                           <p className="text-sm text-muted-foreground mt-2">
                             Quiz Attempts
                           </p>
                         </div>
                         <div className="bg-card rounded-lg p-4 text-center border border-border">
-                          <p className="text-3xl font-bold text-primary">0</p>
+                          <p className="text-3xl font-bold text-primary">
+                            {Math.round(learningSummary?.overall.best_score ?? 0)}%
+                          </p>
                           <p className="text-sm text-muted-foreground mt-2">
-                            Resources Saved
+                            Best Score
                           </p>
                         </div>
                       </div>
@@ -310,12 +353,47 @@ const Profile: React.FC = () => {
 
                     <div className="bg-muted/50 rounded-lg p-6 border border-border">
                       <h3 className="font-semibold text-foreground mb-4">
-                        Recent Activity
+                        Per-Course Scores
                       </h3>
-                      <p className="text-muted-foreground text-center py-8">
-                        No recent activity yet. Start learning to see your
-                        progress here!
-                      </p>
+
+                      {learningSummary?.courses && learningSummary.courses.length > 0 ? (
+                        <div className="space-y-3">
+                          {learningSummary.courses.map((course) => (
+                            <div
+                              key={course.course_id}
+                              className="rounded-lg border border-border bg-card p-4"
+                            >
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="min-w-0">
+                                  <p className="font-medium text-foreground truncate">
+                                    {course.course_name || course.course_id}
+                                  </p>
+                                  <p className="text-xs text-muted-foreground mt-1">
+                                    Attempts: {course.total_attempts} • Questions: {course.total_questions}
+                                  </p>
+                                </div>
+                                <div className="text-right">
+                                  <p className="text-lg font-semibold text-primary">
+                                    {Math.round(course.average_score)}%
+                                  </p>
+                                  <p className="text-xs text-muted-foreground">
+                                    Best: {Math.round(course.best_score)}%
+                                  </p>
+                                </div>
+                              </div>
+                              {course.latest_feedback && (
+                                <p className="text-xs text-muted-foreground mt-3 border-t border-border pt-2">
+                                  Latest feedback: {course.latest_feedback}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-muted-foreground text-center py-8">
+                          No scored quizzes yet. Complete a generated quiz to populate per-course scores.
+                        </p>
+                      )}
                     </div>
                   </TabsContent>
 

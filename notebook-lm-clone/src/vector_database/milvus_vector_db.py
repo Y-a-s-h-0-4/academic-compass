@@ -163,6 +163,28 @@ class MilvusVectorDB:
         except Exception as e:
             logger.error(f"Error deleting collection: {str(e)}")
             raise
+
+    def delete_by_source_file(self, source_file: str) -> int:
+        """Delete vectors associated with a source file and return removed vector count."""
+        if not source_file:
+            return 0
+
+        try:
+            matches = self.chroma_collection.get(
+                where={"source_file": source_file},
+                include=["metadatas"],
+            )
+            ids = matches.get("ids", []) if matches else []
+
+            if not ids:
+                return 0
+
+            self.chroma_collection.delete(ids=ids)
+            logger.info(f"Deleted {len(ids)} vectors for source_file='{source_file}'")
+            return len(ids)
+        except Exception as e:
+            logger.error(f"Error deleting vectors for source_file='{source_file}': {str(e)}")
+            return 0
     
     def get_chunk_by_id(self, chunk_id: str) -> Optional[Dict[str, Any]]:
         try:

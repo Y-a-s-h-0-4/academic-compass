@@ -9,9 +9,10 @@ import { AnalyticsView } from "@/features/analytics/components/AnalyticsView";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { PanelRight, Plus, BookOpen, Send, Loader2, Play, Pause, SkipBack, SkipForward, Mic, MicOff, ArrowDown, Sun, Moon, FileUp, Globe, X, Paperclip, GraduationCap, HelpCircle, Layers, Network, FileText } from "lucide-react";
+import { PanelRight, Plus, BookOpen, Send, Loader2, Play, Pause, SkipBack, SkipForward, Mic, MicOff, ArrowDown, Sun, Moon, FileUp, Globe, X, Paperclip, GraduationCap, HelpCircle, Layers, Network, FileText, ExternalLink, Trash2 } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import UserProfile from "@/components/UserProfile";
 import { useUserContext } from "@/context/UserContext";
@@ -20,10 +21,12 @@ import {
   listSources,
   queryRag,
   queryStream,
+  deleteSource,
   getConversationHistory,
   saveConversationMessage,
   generateLearningAid,
   LearningAidType,
+  submitLearningScore,
 } from "@/lib/notebookApi";
 
 type ChatMessage = {
@@ -43,6 +46,17 @@ type ChatItem = {
 type CourseItem = {
   id: string;
   title: string;
+};
+
+type SourceItem = {
+  id: string;
+  user_id?: string;
+  chat_id?: string;
+  name: string;
+  path: string;
+  type: string;
+  chunks: number;
+  created_at?: string;
 };
 
 type PersistedChatState = {
@@ -217,6 +231,76 @@ const getVisualReferences = (sources?: Array<Record<string, any>>) => {
   return visuals;
 };
 
+const extractCitationNumbers = (content?: string) => {
+  const text = typeof content === "string" ? content : "";
+  const refs = new Set<number>();
+  const matches = text.match(/\[(\d+)\]/g) || [];
+
+  for (const match of matches) {
+    const parsed = Number(match.replace("[", "").replace("]", ""));
+    if (Number.isFinite(parsed) && parsed > 0) {
+      refs.add(parsed);
+    }
+  }
+
+  return refs;
+};
+
+const getVisualReferencesForMessage = (
+  sources?: Array<Record<string, any>>,
+  messageContent?: string,
+) => {
+  const visuals = getVisualReferences(sources);
+  if (visuals.length === 0) {
+    return [];
+  }
+
+  const answerText = (messageContent || "").trim();
+  const citedRefs = extractCitationNumbers(answerText);
+
+  if (citedRefs.size > 0) {
+    return visuals.filter((visual, index) => {
+      const sourceRef = String(visual?.reference || "").trim();
+      const fromReference = /^\[(\d+)\]$/.exec(sourceRef);
+      const refNumber = fromReference ? Number(fromReference[1]) : index + 1;
+      return citedRefs.has(refNumber);
+    });
+  }
+
+  const noInfoFallback = /^I don't have information about this in the course materials\.?$/i;
+  if (noInfoFallback.test(answerText)) {
+    return [];
+  }
+
+  const mentionsVisual = /(image|figure|diagram|visual|table|chart|graph)/i.test(answerText);
+  if (!mentionsVisual) {
+    return [];
+  }
+
+  return visuals.slice(0, 3);
+};
+
+const buildSourceViewUrl = (source: SourceItem, userId?: string | null): string => {
+  const rawPath = (source.path || "").trim();
+  if (!NOTEBOOK_API_URL) {
+    return "";
+  }
+
+  if (!userId || !source?.id) {
+    return "";
+  }
+
+  const params = new URLSearchParams({
+    user_id: userId,
+  });
+
+  if (source.chat_id) {
+    params.set("chat_id", source.chat_id);
+  }
+
+  return `${NOTEBOOK_API_URL}/api/sources/${encodeURIComponent(source.id)}/view?${params.toString()}`;
+};
+
 const sanitizeChatState = (value: any): PersistedChatState | null => {
   if (!value || typeof value !== "object") return null;
 
@@ -285,7 +369,12 @@ const Index = () => {
   const [showQuiz, setShowQuiz] = useState(false);
 
   // Notebook API state
-  const [sources, setSources] = useState<Array<{ id: string; name: string; path: string; type: string; chunks: number }>>([]);
+  const [sources, setSources] = useState<SourceItem[]>([]);
+  const [sourcesByCourse, setSourcesByCourse] = useState<Record<string, SourceItem[]>>({});
+  const [selectedSourceCourseId, setSelectedSourceCourseId] = useState<string>("all");
+  const [sourcesPageLoading, setSourcesPageLoading] = useState(false);
+  const [sourcesPageError, setSourcesPageError] = useState<string | null>(null);
+  const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
   const [ingestLoading, setIngestLoading] = useState(false);
   const [ingestMessage, setIngestMessage] = useState<string | null>(null);
   const [webUrl, setWebUrl] = useState("");
@@ -305,6 +394,9 @@ const Index = () => {
   const [queryLoading, setQueryLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const [currentAudioUrl, setCurrentAudioUrl] = useState<string | null>(null);
+  const [zoomedImageUrl, setZoomedImageUrl] = useState<string | null>(null);
+  const [zoomedImageAlt, setZoomedImageAlt] = useState<string>("Extracted image");
+  const [queryWarning, setQueryWarning] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState("");
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -491,6 +583,41 @@ const Index = () => {
     setChats((prev) => prev.map((item) => (
       item.id === chatId ? { ...item, courseId } : item
     )));
+  };
+
+  const openCourseContext = (courseId: string) => {
+    const existingCourseChat = chats.find((chat) => chat.courseId === courseId);
+
+    if (existingCourseChat) {
+      setActiveChatId(existingCourseChat.id);
+      setActivePage(`course-${courseId}`);
+      resetTransientState();
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 0);
+      return;
+    }
+
+    // Auto-create a chat scoped to this course so uploads/queries are categorized correctly.
+    const course = courses.find((item) => item.id === courseId);
+    const newChat: ChatItem = {
+      id: `chat-${Date.now()}`,
+      title: course ? `${course.title} Chat` : `Course Chat ${chats.length + 1}`,
+      courseId,
+    };
+
+    setChats((prev) => [newChat, ...prev]);
+    setChatMessagesById((prev) => ({
+      ...prev,
+      [newChat.id]: [],
+    }));
+    setActiveChatId(newChat.id);
+    setActivePage(`course-${courseId}`);
+    resetTransientState();
+
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 0);
   };
 
   const scrollToBottom = () => {
@@ -761,17 +888,19 @@ const Index = () => {
   const handleQuerySubmitWithText = async (text: string) => {
     if (!text.trim()) return;
     if (!userId) {
-      setAnswer("Please sign in to ask questions.");
+      setQueryWarning("Please sign in to ask questions.");
       return;
     }
     if (!activeChatId) {
-      setAnswer("Create or select a chat first.");
+      setQueryWarning("Create or select a chat first.");
       return;
     }
     if (sources.length === 0) {
-      setAnswer("No sources yet. Use the + button to add PDFs, documents, or web links first.");
+      setQueryWarning("No sources yet. Use the + button to add PDFs, documents, or web links first.");
       return;
     }
+
+    setQueryWarning(null);
 
     // Add user message to conversation
     const userMessage = {
@@ -886,6 +1015,94 @@ const Index = () => {
       setSources(res.sources || []);
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const loadSourcesByCourse = async () => {
+    if (!userId) {
+      setSourcesByCourse({});
+      return;
+    }
+
+    const chatList = chats;
+    const emptyByCourse: Record<string, SourceItem[]> = {
+      all: [],
+      uncategorized: [],
+      ...Object.fromEntries(courses.map((course) => [course.id, [] as SourceItem[]])),
+    };
+
+    if (chatList.length === 0) {
+      setSourcesByCourse(emptyByCourse);
+      return;
+    }
+
+    setSourcesPageLoading(true);
+    setSourcesPageError(null);
+
+    try {
+      const results = await Promise.all(
+        chatList.map(async (chat) => {
+          const res = await listSources(userId, chat.id);
+          const sourceRows = Array.isArray(res.sources) ? res.sources : [];
+          return {
+            chat,
+            sources: sourceRows.map((row: any) => ({ ...row, chat_id: row.chat_id || chat.id })) as SourceItem[],
+          };
+        }),
+      );
+
+      const byCourse: Record<string, SourceItem[]> = {
+        all: [],
+        uncategorized: [],
+        ...Object.fromEntries(courses.map((course) => [course.id, [] as SourceItem[]])),
+      };
+
+      const seen = new Set<string>();
+
+      for (const { chat, sources: sourceRows } of results) {
+        for (const src of sourceRows) {
+          const dedupeKey = String(src.id || "") || `${chat.id}:${src.name}:${src.path}`;
+          if (seen.has(dedupeKey)) continue;
+          seen.add(dedupeKey);
+
+          byCourse.all.push(src);
+          const courseBucket = chat.courseId && byCourse[chat.courseId] ? chat.courseId : "uncategorized";
+          byCourse[courseBucket].push(src);
+        }
+      }
+
+      setSourcesByCourse(byCourse);
+    } catch (err: any) {
+      console.error(err);
+      setSourcesPageError(err?.message || "Failed to load sources by course.");
+    } finally {
+      setSourcesPageLoading(false);
+    }
+  };
+
+  const handleDeleteSource = async (source: SourceItem) => {
+    if (!userId) return;
+    const sourceChatId = source.chat_id || activeChatId;
+    if (!sourceChatId) return;
+
+    const confirmed = window.confirm(`Delete source \"${source.name}\"? This cannot be undone.`);
+    if (!confirmed) return;
+
+    setDeletingSourceId(source.id);
+    setSourcesPageError(null);
+
+    try {
+      await deleteSource({
+        userId,
+        chatId: sourceChatId,
+        sourceId: source.id,
+      });
+      await Promise.all([refreshSources(), loadSourcesByCourse()]);
+    } catch (err: any) {
+      console.error(err);
+      setSourcesPageError(err?.message || "Failed to delete source.");
+    } finally {
+      setDeletingSourceId(null);
     }
   };
 
@@ -1004,9 +1221,53 @@ const Index = () => {
     }
   };
 
+  const handleQuizComplete = async (result: {
+    totalQuestions: number;
+    correctAnswers: number;
+    scorePercent: number;
+    feedback: string;
+  }) => {
+    if (!userId || !activeChatId) return;
+
+    const activeChat = chats.find((chat) => chat.id === activeChatId);
+    const activeCourse = activeChat?.courseId
+      ? courses.find((course) => course.id === activeChat.courseId)
+      : null;
+
+    const courseId = activeCourse?.id || activeChatId;
+    const courseName = activeCourse?.title || activeChat?.title || "Uncategorized";
+
+    try {
+      await submitLearningScore({
+        userId,
+        chatId: activeChatId,
+        courseId,
+        courseName,
+        totalQuestions: result.totalQuestions,
+        correctAnswers: result.correctAnswers,
+        feedback: result.feedback,
+      });
+    } catch (err) {
+      console.error("Failed to submit quiz score:", err);
+    }
+  };
+
   useEffect(() => {
     refreshSources();
   }, [userId, activeChatId]);
+
+  useEffect(() => {
+    if (activePage !== "sources") return;
+    loadSourcesByCourse();
+  }, [activePage, userId, chats, courses]);
+
+  useEffect(() => {
+    if (selectedSourceCourseId === "all") return;
+    const validCourseIds = new Set(["uncategorized", ...courses.map((course) => course.id)]);
+    if (!validCourseIds.has(selectedSourceCourseId)) {
+      setSelectedSourceCourseId("all");
+    }
+  }, [selectedSourceCourseId, courses]);
 
   const renderContent = () => {
     if (showQuiz) {
@@ -1024,49 +1285,114 @@ const Index = () => {
     }
 
     if (activePage === "sources") {
+      const hasUncategorizedChats = chats.some((chat) => !chat.courseId);
+      const courseFilters = [
+        { id: "all", title: "All Courses" },
+        ...courses.map((course) => ({ id: course.id, title: course.title })),
+        ...(hasUncategorizedChats ? [{ id: "uncategorized", title: "Uncategorized" }] : []),
+      ];
+      const selectedSources = sourcesByCourse[selectedSourceCourseId] || [];
+
       return (
         <div className="flex-1 p-6 overflow-y-auto">
           <div className="max-w-5xl mx-auto space-y-6">
             <div>
               <h1 className="font-serif text-3xl text-foreground mb-2">Sources</h1>
-              <p className="text-muted-foreground">Upload documents or ingest a web page to ground answers.</p>
+              <p className="text-muted-foreground">Browse and manage sources by course. Add new sources from the chat page.</p>
             </div>
 
             <Card>
               <CardHeader>
-                <CardTitle>Ingest</CardTitle>
+                <CardTitle>Course Sources</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div className="space-y-2">
-                  <Input type="file" multiple onChange={(e) => setSelectedFiles(e.target.files)} />
-                  <Input
-                    placeholder="https://example.com/article"
-                    value={webUrl}
-                    onChange={(e) => setWebUrl(e.target.value)}
-                  />
-                  <div className="flex gap-3 items-center">
-                    <Button onClick={() => handleIngest()} disabled={ingestLoading}>
-                      {ingestLoading ? "Ingesting..." : "Ingest"}
-                    </Button>
-                    {ingestMessage && <span className="text-sm text-muted-foreground">{ingestMessage}</span>}
-                  </div>
+                <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                  <label className="text-sm text-muted-foreground sm:w-24">Course</label>
+                  <select
+                    value={selectedSourceCourseId}
+                    onChange={(e) => setSelectedSourceCourseId(e.target.value)}
+                    aria-label="Select course to filter sources"
+                    title="Select course to filter sources"
+                    className="h-10 rounded-md border border-input bg-background px-3 text-sm"
+                  >
+                    {courseFilters.map((course) => (
+                      <option key={course.id} value={course.id}>{course.title}</option>
+                    ))}
+                  </select>
+                  <Button variant="outline" onClick={loadSourcesByCourse} disabled={sourcesPageLoading}>
+                    {sourcesPageLoading ? "Refreshing..." : "Refresh"}
+                  </Button>
                 </div>
+
+                {sourcesPageError && (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    {sourcesPageError}
+                  </div>
+                )}
 
                 <Separator />
 
-                <div className="space-y-2">
-                  <p className="text-sm font-medium text-muted-foreground">Current sources</p>
-                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                    {sources.length === 0 && (
-                      <div className="text-sm text-muted-foreground">No sources yet.</div>
-                    )}
-                    {sources.map((src) => (
-                      <div key={src.id} className="border rounded-lg p-3 bg-card shadow-sm">
-                        <p className="font-medium text-foreground truncate">{src.name}</p>
-                        <p className="text-xs text-muted-foreground">{src.type} • {src.chunks} chunks</p>
-                        <p className="text-[11px] text-muted-foreground break-all mt-1">{src.path}</p>
-                      </div>
-                    ))}
+                <div className="space-y-3">
+                  <p className="text-sm font-medium text-muted-foreground">Sources in selected course</p>
+
+                  {sourcesPageLoading && (
+                    <div className="text-sm text-muted-foreground">Loading sources...</div>
+                  )}
+
+                  {!sourcesPageLoading && selectedSources.length === 0 && (
+                    <div className="text-sm text-muted-foreground">No sources found for this course.</div>
+                  )}
+
+                  <div className="space-y-2">
+                    {selectedSources.map((src) => {
+                      const sourceChat = chats.find((chat) => chat.id === src.chat_id);
+                      const sourceCourse = sourceChat?.courseId
+                        ? courses.find((course) => course.id === sourceChat.courseId)
+                        : null;
+                      const viewUrl = buildSourceViewUrl(src, userId);
+
+                      return (
+                        <div key={src.id} className="border rounded-lg p-3 bg-card shadow-sm flex flex-col gap-2">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <p className="font-medium text-foreground truncate">{src.name}</p>
+                              <p className="text-xs text-muted-foreground">
+                                {src.type || "unknown"} • {src.chunks ?? 0} chunks
+                                {sourceCourse ? ` • ${sourceCourse.title}` : " • Uncategorized"}
+                                {sourceChat ? ` • ${sourceChat.title}` : ""}
+                              </p>
+                              <p className="text-[11px] text-muted-foreground break-all mt-1">{src.path}</p>
+                            </div>
+
+                            <div className="flex items-center gap-2 shrink-0">
+                              {viewUrl ? (
+                                <Button variant="outline" size="sm" asChild>
+                                  <a href={viewUrl} target="_blank" rel="noreferrer">
+                                    <ExternalLink className="w-3.5 h-3.5 mr-1" />
+                                    View
+                                  </a>
+                                </Button>
+                              ) : (
+                                <Button variant="outline" size="sm" disabled title="View is available for web links and stored uploads">
+                                  <ExternalLink className="w-3.5 h-3.5 mr-1" />
+                                  View
+                                </Button>
+                              )}
+
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                onClick={() => handleDeleteSource(src)}
+                                disabled={deletingSourceId === src.id}
+                              >
+                                <Trash2 className="w-3.5 h-3.5 mr-1" />
+                                {deletingSourceId === src.id ? "Deleting..." : "Delete"}
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </CardContent>
@@ -1111,7 +1437,7 @@ const Index = () => {
                 )}
 
                 {messages.map((msg) => {
-                  const visualSources = getVisualReferences(msg.sources);
+                  const visualSources = getVisualReferencesForMessage(msg.sources, msg.content);
 
                   return (
                     <div
@@ -1217,7 +1543,11 @@ const Index = () => {
                                       src={imageUrl}
                                       alt={visual.asset_name || `Extracted image ${visualIndex + 1}`}
                                       loading="lazy"
-                                      className="w-full max-h-64 object-contain rounded-md border border-border/40 bg-background"
+                                      className="w-full max-h-64 object-contain rounded-md border border-border/40 bg-background cursor-zoom-in"
+                                      onClick={() => {
+                                        setZoomedImageUrl(imageUrl);
+                                        setZoomedImageAlt(visual.asset_name || `Extracted image ${visualIndex + 1}`);
+                                      }}
                                     />
                                   </div>
                                 );
@@ -1310,6 +1640,12 @@ const Index = () => {
                     <Button variant="ghost" size="icon-sm" onClick={() => setIngestMessage(null)}>
                       <X className="w-3 h-3" />
                     </Button>
+                  </div>
+                )}
+
+                {queryWarning && (
+                  <div className="mb-3 text-sm text-amber-700 bg-amber-100 dark:bg-amber-950/30 dark:text-amber-300 p-3 rounded-lg">
+                    {queryWarning}
                   </div>
                 )}
 
@@ -1511,6 +1847,18 @@ const Index = () => {
                     )}
                   </Button>
                 </div>
+
+                <Dialog open={Boolean(zoomedImageUrl)} onOpenChange={(open) => !open && setZoomedImageUrl(null)}>
+                  <DialogContent className="max-w-5xl w-[95vw] p-2 bg-background/95 border-border/60">
+                    {zoomedImageUrl && (
+                      <img
+                        src={zoomedImageUrl}
+                        alt={zoomedImageAlt}
+                        className="w-full max-h-[85vh] object-contain rounded-md"
+                      />
+                    )}
+                  </DialogContent>
+                </Dialog>
               </div>
             </div>
           </div>
@@ -1524,6 +1872,7 @@ const Index = () => {
           <div className="max-w-6xl mx-auto">
             <div className="flex items-center justify-between mb-8">
               <div>
+
                 <h1 className="font-serif text-3xl text-foreground mb-2">Your Courses</h1>
                 <p className="text-muted-foreground">Organize your chats into learning tracks</p>
               </div>
@@ -1553,7 +1902,7 @@ const Index = () => {
                     resourceLabel={chatCount === 1 ? "chat" : "chats"}
                     lastAccessed={new Date()}
                     progress={0}
-                    onClick={() => setActivePage("home")}
+                    onClick={() => openCourseContext(course.id)}
                     onDelete={() => handleDeleteCourse(course.id)}
                   />
                 );
@@ -1671,6 +2020,7 @@ const Index = () => {
           }
         }}
         onRegenerate={(tab) => handleGenerateAid(tab, true)}
+        onQuizComplete={handleQuizComplete}
       />
     </div>
   );

@@ -7,13 +7,13 @@ import hashlib
 import logging
 import asyncio
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -59,9 +59,12 @@ for folder in (UPLOAD_DIR, OUTPUT_DIR, CACHE_DIR):
 
 # Mount static files directory for audio/podcast outputs (after OUTPUT_DIR is defined)
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
+app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 # In-memory fallback registry keyed by user_id -> chat_id when DB unavailable
 sources_registry: Dict[str, Dict[str, List[dict]]] = {}
+learning_scores_registry: Dict[str, Dict[str, dict]] = {}
+learning_attempts_registry: Dict[str, List[dict]] = {}
 
 
 def sanitize_collection_name(value: str) -> str:
@@ -84,6 +87,14 @@ def build_pipeline_identity(user_id: str, chat_id: str) -> str:
 def get_memory_sources_bucket(user_id: str, chat_id: str) -> List[dict]:
     user_bucket = sources_registry.setdefault(user_id, {})
     return user_bucket.setdefault(chat_id, [])
+
+
+def get_memory_learning_scores_bucket(user_id: str) -> Dict[str, dict]:
+    return learning_scores_registry.setdefault(user_id, {})
+
+
+def get_memory_learning_attempts_bucket(user_id: str) -> List[dict]:
+    return learning_attempts_registry.setdefault(user_id, [])
 
 
 def get_db_connection():
@@ -157,11 +168,291 @@ def ensure_sources_table():
                     ON conversation_history(user_id, chat_id, created_at DESC);
                     """
                 )
+
+                # Learning scores aggregated by user + course
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS learning_course_scores (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        user_id TEXT NOT NULL,
+                        chat_id TEXT NOT NULL DEFAULT 'default',
+                        course_id TEXT NOT NULL,
+                        course_name TEXT,
+                        total_attempts INT NOT NULL DEFAULT 0,
+                        total_questions INT NOT NULL DEFAULT 0,
+                        total_correct INT NOT NULL DEFAULT 0,
+                        average_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        best_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        latest_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+                        latest_feedback TEXT,
+                        created_at TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at TIMESTAMPTZ DEFAULT NOW(),
+                        UNIQUE(user_id, course_id)
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_learning_scores_user_updated
+                    ON learning_course_scores(user_id, updated_at DESC);
+                    """
+                )
+
+                # Raw attempt history for future tests/analytics
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS learning_quiz_attempts (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        user_id TEXT NOT NULL,
+                        chat_id TEXT NOT NULL DEFAULT 'default',
+                        course_id TEXT NOT NULL,
+                        course_name TEXT,
+                        total_questions INT NOT NULL,
+                        correct_answers INT NOT NULL,
+                        score DOUBLE PRECISION NOT NULL,
+                        feedback TEXT,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_learning_attempts_user_time
+                    ON learning_quiz_attempts(user_id, created_at DESC);
+                    """
+                )
         conn.close()
         logger.info("Database tables created/verified successfully")
     except Exception as e:
         logger.error(f"Failed to create tables: {e}")
         # Don't crash the app if table creation fails
+
+
+def save_learning_score(
+    user_id: str,
+    chat_id: str,
+    course_id: str,
+    course_name: str,
+    total_questions: int,
+    correct_answers: int,
+    feedback: Optional[str] = None,
+) -> Dict[str, Any]:
+    chat_scope = normalize_chat_id(chat_id)
+    safe_course_id = sanitize_collection_name(course_id)[:64] or chat_scope
+    safe_course_name = (course_name or "").strip() or safe_course_id
+    questions = max(int(total_questions), 1)
+    correct = max(0, min(int(correct_answers), questions))
+    score = round((correct / questions) * 100, 2)
+
+    conn = get_db_connection()
+    if not conn:
+        bucket = get_memory_learning_scores_bucket(user_id)
+        existing = bucket.get(safe_course_id)
+        if existing:
+            total_attempts = int(existing.get("total_attempts", 0)) + 1
+            total_q = int(existing.get("total_questions", 0)) + questions
+            total_c = int(existing.get("total_correct", 0)) + correct
+            average_score = round((total_c / total_q) * 100, 2) if total_q else 0.0
+            best_score = max(float(existing.get("best_score", 0)), score)
+        else:
+            total_attempts = 1
+            total_q = questions
+            total_c = correct
+            average_score = score
+            best_score = score
+
+        result = {
+            "user_id": user_id,
+            "chat_id": chat_scope,
+            "course_id": safe_course_id,
+            "course_name": safe_course_name,
+            "total_attempts": total_attempts,
+            "total_questions": total_q,
+            "total_correct": total_c,
+            "average_score": average_score,
+            "best_score": best_score,
+            "latest_score": score,
+            "latest_feedback": feedback or "",
+        }
+        bucket[safe_course_id] = result
+        get_memory_learning_attempts_bucket(user_id).append(
+            {
+                "user_id": user_id,
+                "chat_id": chat_scope,
+                "course_id": safe_course_id,
+                "course_name": safe_course_name,
+                "total_questions": questions,
+                "correct_answers": correct,
+                "score": score,
+                "feedback": feedback or "",
+            }
+        )
+        return result
+
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO learning_quiz_attempts (
+                        user_id, chat_id, course_id, course_name, total_questions, correct_answers, score, feedback
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+                    """,
+                    (
+                        user_id,
+                        chat_scope,
+                        safe_course_id,
+                        safe_course_name,
+                        questions,
+                        correct,
+                        score,
+                        feedback,
+                    ),
+                )
+
+                cur.execute(
+                    """
+                    INSERT INTO learning_course_scores (
+                        user_id,
+                        chat_id,
+                        course_id,
+                        course_name,
+                        total_attempts,
+                        total_questions,
+                        total_correct,
+                        average_score,
+                        best_score,
+                        latest_score,
+                        latest_feedback,
+                        updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, 1, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (user_id, course_id) DO UPDATE SET
+                        chat_id = EXCLUDED.chat_id,
+                        course_name = COALESCE(NULLIF(EXCLUDED.course_name, ''), learning_course_scores.course_name),
+                        total_attempts = learning_course_scores.total_attempts + 1,
+                        total_questions = learning_course_scores.total_questions + EXCLUDED.total_questions,
+                        total_correct = learning_course_scores.total_correct + EXCLUDED.total_correct,
+                        average_score = ROUND(
+                            ((learning_course_scores.total_correct + EXCLUDED.total_correct)::numeric
+                            / NULLIF((learning_course_scores.total_questions + EXCLUDED.total_questions), 0)) * 100,
+                            2
+                        )::double precision,
+                        best_score = GREATEST(learning_course_scores.best_score, EXCLUDED.latest_score),
+                        latest_score = EXCLUDED.latest_score,
+                        latest_feedback = EXCLUDED.latest_feedback,
+                        updated_at = NOW()
+                    RETURNING
+                        user_id,
+                        chat_id,
+                        course_id,
+                        course_name,
+                        total_attempts,
+                        total_questions,
+                        total_correct,
+                        average_score,
+                        best_score,
+                        latest_score,
+                        latest_feedback,
+                        updated_at;
+                    """,
+                    (
+                        user_id,
+                        chat_scope,
+                        safe_course_id,
+                        safe_course_name,
+                        questions,
+                        correct,
+                        score,
+                        score,
+                        score,
+                        feedback,
+                    ),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else {}
+    finally:
+        conn.close()
+
+
+def fetch_learning_score_summary(user_id: str) -> Dict[str, Any]:
+    conn = get_db_connection()
+    if not conn:
+        course_rows = list(get_memory_learning_scores_bucket(user_id).values())
+        total_attempts = sum(int(row.get("total_attempts", 0)) for row in course_rows)
+        total_questions = sum(int(row.get("total_questions", 0)) for row in course_rows)
+        total_correct = sum(int(row.get("total_correct", 0)) for row in course_rows)
+        overall_avg = round((total_correct / total_questions) * 100, 2) if total_questions else 0.0
+        best_score = max((float(row.get("best_score", 0)) for row in course_rows), default=0.0)
+        return {
+            "user_id": user_id,
+            "overall": {
+                "total_attempts": total_attempts,
+                "average_score": overall_avg,
+                "best_score": round(best_score, 2),
+                "total_courses": len(course_rows),
+            },
+            "courses": sorted(course_rows, key=lambda row: row.get("average_score", 0), reverse=True),
+        }
+
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        user_id,
+                        chat_id,
+                        course_id,
+                        course_name,
+                        total_attempts,
+                        total_questions,
+                        total_correct,
+                        average_score,
+                        best_score,
+                        latest_score,
+                        latest_feedback,
+                        updated_at
+                    FROM learning_course_scores
+                    WHERE user_id = %s
+                    ORDER BY updated_at DESC;
+                    """,
+                    (user_id,),
+                )
+                rows = [dict(row) for row in cur.fetchall()]
+
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(total_attempts), 0) AS total_attempts,
+                        COALESCE(SUM(total_questions), 0) AS total_questions,
+                        COALESCE(SUM(total_correct), 0) AS total_correct,
+                        COALESCE(MAX(best_score), 0) AS best_score,
+                        COUNT(*) AS total_courses
+                    FROM learning_course_scores
+                    WHERE user_id = %s;
+                    """,
+                    (user_id,),
+                )
+                overall_row = dict(cur.fetchone() or {})
+
+        total_questions = int(overall_row.get("total_questions") or 0)
+        total_correct = int(overall_row.get("total_correct") or 0)
+        average_score = round((total_correct / total_questions) * 100, 2) if total_questions else 0.0
+
+        return {
+            "user_id": user_id,
+            "overall": {
+                "total_attempts": int(overall_row.get("total_attempts") or 0),
+                "average_score": average_score,
+                "best_score": round(float(overall_row.get("best_score") or 0), 2),
+                "total_courses": int(overall_row.get("total_courses") or 0),
+            },
+            "courses": rows,
+        }
+    finally:
+        conn.close()
 
 
 def save_source_record(source: dict):
@@ -231,11 +522,136 @@ def fetch_sources_for_user(user_id: str, chat_id: Optional[str]) -> List[dict]:
         conn.close()
 
 
+def fetch_source_for_user(user_id: str, source_id: str, chat_id: Optional[str] = None) -> Optional[dict]:
+    """Fetch a single source by id for a user, optionally scoped to a chat."""
+    chat_scope = normalize_chat_id(chat_id) if chat_id else None
+    conn = get_db_connection()
+
+    if not conn:
+        user_bucket = sources_registry.get(user_id, {})
+        if chat_scope:
+            for item in user_bucket.get(chat_scope, []):
+                if str(item.get("id")) == source_id:
+                    return item
+            return None
+
+        for items in user_bucket.values():
+            for item in items:
+                if str(item.get("id")) == source_id:
+                    return item
+        return None
+
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                if chat_scope:
+                    cur.execute(
+                        """
+                        SELECT id, user_id, chat_id, name, path, type, chunks, created_at
+                        FROM notebooklm_sources
+                        WHERE id::text = %s AND user_id = %s AND chat_id = %s
+                        LIMIT 1;
+                        """,
+                        (source_id, user_id, chat_scope),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        return dict(row)
+
+                cur.execute(
+                    """
+                    SELECT id, user_id, chat_id, name, path, type, chunks, created_at
+                    FROM notebooklm_sources
+                    WHERE id::text = %s AND user_id = %s
+                    LIMIT 1;
+                    """,
+                    (source_id, user_id),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"Failed to fetch source in DB: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def delete_source_for_user(user_id: str, chat_id: str, source_id: str) -> Optional[dict]:
+    """Delete one source record and return the deleted row payload for vector cleanup."""
+    chat_scope = normalize_chat_id(chat_id)
+    conn = get_db_connection()
+
+    if not conn:
+        bucket = get_memory_sources_bucket(user_id, chat_scope)
+        for idx, item in enumerate(bucket):
+            if str(item.get("id")) == source_id:
+                return bucket.pop(idx)
+        return None
+
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    """
+                    DELETE FROM notebooklm_sources
+                    WHERE id::text = %s AND user_id = %s AND chat_id = %s
+                    RETURNING id, user_id, chat_id, name, path, type, chunks;
+                    """,
+                    (source_id, user_id, chat_scope),
+                )
+                row = cur.fetchone()
+                if row:
+                    return dict(row)
+
+                # Fallback: allow delete by source id + user across chats.
+                cur.execute(
+                    """
+                    DELETE FROM notebooklm_sources
+                    WHERE id::text = %s AND user_id = %s
+                    RETURNING id, user_id, chat_id, name, path, type, chunks;
+                    """,
+                    (source_id, user_id),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else None
+    except Exception as e:
+        logger.error(f"Failed to delete source in DB: {e}")
+        raise
+    finally:
+        conn.close()
+
+
 class QueryRequest(BaseModel):
     query: str
     top_k: int = 8
     user_id: str
     chat_id: str = "default"
+
+
+NO_INFO_FALLBACK = "I don't have information about this in the course materials."
+
+
+def _adapt_image_only_answer(answer: str, sources: List[dict]) -> str:
+    cleaned = (answer or "").strip()
+    if cleaned.lower().rstrip(".") != NO_INFO_FALLBACK.lower().rstrip("."):
+        return answer
+
+    visual_refs: List[str] = []
+    for source in sources or []:
+        if source.get("asset_type") != "image":
+            continue
+        reference = str(source.get("reference") or "").strip()
+        if reference and reference not in visual_refs:
+            visual_refs.append(reference)
+
+    if not visual_refs:
+        return answer
+
+    refs_preview = ", ".join(visual_refs[:4])
+    return (
+        "I couldn't find enough text details for this question, "
+        f"but I found relevant extracted images you can review below {refs_preview}."
+    )
 
 
 class SummaryRequest(BaseModel):
@@ -261,6 +677,16 @@ class LearningAidRequest(BaseModel):
     num_questions: int = 5
     num_cards: int = 10
     max_chunks: int = 12
+
+
+class LearningScoreSubmissionRequest(BaseModel):
+    user_id: str
+    chat_id: str = "default"
+    course_id: Optional[str] = None
+    course_name: Optional[str] = None
+    total_questions: int
+    correct_answers: int
+    feedback: Optional[str] = None
 
 
 # Shared components and per-user pipelines
@@ -384,6 +810,65 @@ def list_sources(user_id: str, chat_id: str = "default"):
     return {"sources": sources}
 
 
+@app.delete("/api/sources/{source_id}")
+def delete_source(source_id: str, user_id: str, chat_id: str = "default"):
+    chat_scope = normalize_chat_id(chat_id)
+    deleted_source = delete_source_for_user(user_id, chat_scope, source_id)
+
+    if not deleted_source:
+        raise HTTPException(status_code=404, detail="Source not found")
+
+    # Best-effort vector cleanup to keep retrieval aligned with source list.
+    removed_vectors = 0
+    try:
+        user_pipeline = get_user_pipeline(user_id, chat_scope)
+        source_name = (deleted_source.get("name") or "").strip()
+        if source_name:
+            removed_vectors = user_pipeline["vector_db"].delete_by_source_file(source_name)
+    except Exception as e:
+        logger.warning(f"Vector cleanup for source {source_id} failed: {e}")
+
+    return {
+        "status": "ok",
+        "deleted_source_id": source_id,
+        "removed_vectors": removed_vectors,
+    }
+
+
+@app.get("/api/sources/{source_id}/view")
+def view_source(source_id: str, user_id: str, chat_id: Optional[str] = None):
+    source = fetch_source_for_user(user_id=user_id, source_id=source_id, chat_id=chat_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="Source not found")
+
+    source_type = (source.get("type") or "").lower()
+    source_path = (source.get("path") or "").strip()
+    source_name = source.get("name") or "source"
+
+    if source_type == "web":
+        if not source_path:
+            raise HTTPException(status_code=404, detail="Web source URL unavailable")
+        return RedirectResponse(url=source_path)
+
+    if not source_path:
+        raise HTTPException(status_code=404, detail="Source file path unavailable")
+
+    path_obj = Path(source_path)
+    if not path_obj.exists() or not path_obj.is_file():
+        raise HTTPException(status_code=404, detail="Source file not found on server")
+
+    media_type = None
+    suffix = path_obj.suffix.lower()
+    if suffix == ".pdf":
+        media_type = "application/pdf"
+
+    return FileResponse(
+        path=str(path_obj),
+        media_type=media_type,
+        filename=source_name,
+    )
+
+
 @app.post("/api/query")
 def query_rag(req: QueryRequest):
     user_pipeline = get_user_pipeline(req.user_id, req.chat_id)
@@ -392,7 +877,7 @@ def query_rag(req: QueryRequest):
         top_k=req.top_k,
     )
     return {
-        "answer": result.response,
+        "answer": _adapt_image_only_answer(result.response, result.sources_used),
         "sources": result.sources_used,
         "retrieval_count": result.retrieval_count,
     }
@@ -418,7 +903,7 @@ async def query_stream(req: QueryRequest):
             top_k=req.top_k,
         )
         
-        answer_text = rag_result.response
+        answer_text = _adapt_image_only_answer(rag_result.response, rag_result.sources_used)
         sources = rag_result.sources_used
         
         # Generate audio in background (non-blocking)
@@ -566,6 +1051,50 @@ def generate_summary_aid(req: LearningAidRequest):
         "sources": result.sources_used,
         "retrieval_count": result.retrieval_count,
     }
+
+
+@app.post("/api/learning/scores")
+def submit_learning_score(req: LearningScoreSubmissionRequest):
+    if not req.user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if req.total_questions <= 0:
+        raise HTTPException(status_code=400, detail="total_questions must be > 0")
+    if req.correct_answers < 0:
+        raise HTTPException(status_code=400, detail="correct_answers must be >= 0")
+
+    chat_scope = normalize_chat_id(req.chat_id)
+    resolved_course_id = (req.course_id or chat_scope).strip() or chat_scope
+    resolved_course_name = (req.course_name or "").strip() or resolved_course_id
+
+    try:
+        score_row = save_learning_score(
+            user_id=req.user_id,
+            chat_id=chat_scope,
+            course_id=resolved_course_id,
+            course_name=resolved_course_name,
+            total_questions=req.total_questions,
+            correct_answers=req.correct_answers,
+            feedback=req.feedback,
+        )
+        return {
+            "status": "ok",
+            "score": score_row,
+        }
+    except Exception as e:
+        logger.error(f"Failed to submit learning score: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/learning/scores")
+def get_learning_scores(user_id: str):
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    try:
+        return fetch_learning_score_summary(user_id)
+    except Exception as e:
+        logger.error(f"Failed to fetch learning scores: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 

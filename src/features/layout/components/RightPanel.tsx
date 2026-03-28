@@ -17,6 +17,7 @@ interface RightPanelProps {
   activeAidTab: LearningAidType | null;
   onTabChange: (tab: LearningAidType) => void;
   onRegenerate: (tab: LearningAidType) => void;
+  onQuizComplete?: (result: { totalQuestions: number; correctAnswers: number; scorePercent: number; feedback: string }) => void;
 }
 
 const tabs: { key: LearningAidType; label: string; icon: React.ReactNode }[] = [
@@ -34,6 +35,7 @@ export const RightPanel = ({
   activeAidTab,
   onTabChange,
   onRegenerate,
+  onQuizComplete,
 }: RightPanelProps) => {
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -137,7 +139,7 @@ export const RightPanel = ({
 
     switch (activeAidTab) {
       case "quiz":
-        return <QuizView questions={Array.isArray(data) ? data : []} />;
+        return <QuizView questions={Array.isArray(data) ? data : []} onComplete={onQuizComplete} />;
       case "flashcards":
         return <FlashcardView cards={Array.isArray(data) ? data : []} />;
       case "mindmap": {

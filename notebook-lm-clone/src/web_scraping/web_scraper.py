@@ -3,9 +3,14 @@ import os
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, unquote
 import time
 from datetime import datetime
+import hashlib
+import mimetypes
+import re
+import unicodedata
+from urllib.request import Request, urlopen
 
 from firecrawl import Firecrawl
 from src.document_processing.doc_processor import DocumentChunk
@@ -20,15 +25,32 @@ class WebPageData:
     url: str
     title: str
     content: str
+    html_content: str
     metadata: Dict[str, Any]
     success: bool
     error: Optional[str] = None
 
 
 class WebScraper:
-    def __init__(self, api_key: str):
+    def __init__(
+        self,
+        api_key: str,
+        outputs_dir: str = "./outputs",
+        asset_subdir: str = "assets",
+        max_images_per_page: int = 15,
+        min_image_bytes: int = 1024,
+        image_timeout_sec: int = 8,
+    ):
         self.api_key = api_key
         self.app = Firecrawl(api_key=api_key)
+        self.outputs_dir = Path(outputs_dir)
+        self.assets_output_dir = self.outputs_dir / asset_subdir
+        self.max_images_per_page = max_images_per_page
+        self.min_image_bytes = min_image_bytes
+        self.image_timeout_sec = image_timeout_sec
+
+        self.outputs_dir.mkdir(parents=True, exist_ok=True)
+        self.assets_output_dir.mkdir(parents=True, exist_ok=True)
         
         logger.info("WebScraper initialized with Firecrawl")
     
@@ -37,7 +59,8 @@ class WebScraper:
         url: str,
         chunk_size: int = 1000,
         chunk_overlap: int = 100,
-        wait_for_results: int = 30
+        wait_for_results: int = 30,
+        include_images: bool = True,
     ) -> List[DocumentChunk]:
 
         if not self._is_valid_url(url):
@@ -59,6 +82,13 @@ class WebScraper:
                 chunk_size, 
                 chunk_overlap
             )
+
+            if include_images:
+                image_chunks = self._create_chunks_from_web_images(
+                    page_data=page_data,
+                    start_chunk_index=len(chunks),
+                )
+                chunks.extend(image_chunks)
             
             logger.info(f"Successfully scraped {url}: {len(chunks)} chunks created")
             return chunks
@@ -69,8 +99,9 @@ class WebScraper:
     
     def _process_firecrawl_result(self, result: Dict[str, Any], url: str) -> WebPageData:
         try:
-            content = result.markdown
-            metadata_dict = result.metadata_dict
+            content = getattr(result, "markdown", "") or ""
+            html_content = getattr(result, "html", "") or ""
+            metadata_dict = getattr(result, "metadata_dict", {}) or {}
             metadata = {
                 'scraped_at': datetime.now().isoformat(),
                 'original_url': url,
@@ -87,6 +118,7 @@ class WebScraper:
                 url=url,
                 title=metadata['title'] or f"Web Page - {metadata['domain']}",
                 content=content,
+                html_content=html_content,
                 metadata=metadata,
                 success=True
             )
@@ -97,6 +129,7 @@ class WebScraper:
                 url=url,
                 title=f"Error - {urlparse(url).netloc}",
                 content="",
+                html_content="",
                 metadata={'error': str(e), 'scraped_at': datetime.now().isoformat()},
                 success=False,
                 error=str(e)
@@ -156,6 +189,197 @@ class WebScraper:
             start = max(start + chunk_size - chunk_overlap, end)
         
         return chunks
+
+    def _create_chunks_from_web_images(
+        self,
+        page_data: WebPageData,
+        start_chunk_index: int,
+    ) -> List[DocumentChunk]:
+
+        html = page_data.html_content or ""
+        if not html.strip():
+            return []
+
+        image_tags = self._extract_img_tags(html)
+        if not image_tags:
+            return []
+
+        source_asset_dir = self._build_asset_dir(page_data.title or page_data.metadata.get("domain") or "web")
+        source_domain = page_data.metadata.get("domain") or urlparse(page_data.url).netloc
+        image_chunks: List[DocumentChunk] = []
+        seen_urls = set()
+        seen_hashes = set()
+
+        for tag in image_tags:
+            if len(image_chunks) >= self.max_images_per_page:
+                break
+
+            raw_src = (tag.get("src") or "").strip()
+            if not raw_src or raw_src.startswith("data:"):
+                continue
+
+            image_url = urljoin(page_data.url, raw_src)
+            if image_url in seen_urls:
+                continue
+            seen_urls.add(image_url)
+
+            downloaded = self._download_image(image_url)
+            if not downloaded:
+                continue
+
+            image_bytes, content_type = downloaded
+            if len(image_bytes) < self.min_image_bytes:
+                continue
+
+            image_hash = hashlib.md5(image_bytes).hexdigest()
+            if image_hash in seen_hashes:
+                continue
+            seen_hashes.add(image_hash)
+
+            ext = self._resolve_extension(image_url, content_type)
+            original_name = self._extract_image_name_from_url(image_url, fallback=f"image_{len(image_chunks) + 1}.{ext}")
+            safe_base = self._sanitize_filename(Path(original_name).stem) or f"image_{len(image_chunks) + 1}"
+            image_name = f"img_{len(image_chunks) + 1:03d}_{safe_base}.{ext}"
+            image_path = source_asset_dir / image_name
+
+            with open(image_path, "wb") as image_file:
+                image_file.write(image_bytes)
+
+            relative_path = image_path.relative_to(self.outputs_dir).as_posix()
+            asset_url = f"/outputs/{relative_path}"
+
+            image_alt = self._safe_text(tag.get("alt", ""), max_length=400)
+            image_title = self._safe_text(tag.get("title", ""), max_length=400)
+            width = self._coerce_int(tag.get("width"))
+            height = self._coerce_int(tag.get("height"))
+
+            content_parts = [
+                f"Image '{image_name}' extracted from {source_domain}.",
+            ]
+            if image_alt:
+                content_parts.append(f"Alt text: {image_alt}.")
+            if image_title:
+                content_parts.append(f"Title: {image_title}.")
+            content_parts.append(f"Original image URL: {image_url}")
+
+            metadata = {
+                **page_data.metadata,
+                "asset_type": "image",
+                "asset_url": asset_url,
+                "asset_name": image_name,
+                "asset_original_name": original_name,
+                "asset_source_url": image_url,
+                "image_alt": image_alt,
+                "image_title": image_title,
+                "image_hash": image_hash[:12],
+            }
+            if width is not None:
+                metadata["image_width"] = width
+            if height is not None:
+                metadata["image_height"] = height
+
+            image_chunks.append(
+                DocumentChunk(
+                    content=" ".join(content_parts),
+                    source_file=page_data.title,
+                    source_type="web",
+                    page_number=None,
+                    chunk_index=start_chunk_index + len(image_chunks),
+                    metadata=metadata,
+                )
+            )
+
+        return image_chunks
+
+    def _extract_img_tags(self, html: str) -> List[Dict[str, str]]:
+        img_tags = re.findall(r"<img\b[^>]*>", html, flags=re.IGNORECASE)
+        parsed: List[Dict[str, str]] = []
+
+        for tag in img_tags:
+            attrs: Dict[str, str] = {}
+            for key, raw_value in re.findall(
+                r"([a-zA-Z_:][-a-zA-Z0-9_:.]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)",
+                tag,
+            ):
+                value = raw_value.strip().strip("\"'")
+                attrs[key.lower()] = value
+
+            src = attrs.get("src")
+            if src:
+                parsed.append(attrs)
+
+        return parsed
+
+    def _build_asset_dir(self, source_name: str) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        safe_source = self._sanitize_filename(source_name) or "web_source"
+        source_dir = self.assets_output_dir / f"{safe_source}_{timestamp}"
+        source_dir.mkdir(parents=True, exist_ok=True)
+        return source_dir
+
+    def _sanitize_filename(self, value: str) -> str:
+        if not value:
+            return ""
+
+        normalized = unicodedata.normalize("NFKD", value)
+        ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+        sanitized = re.sub(r"[^a-zA-Z0-9._-]+", "_", ascii_value)
+        sanitized = re.sub(r"_+", "_", sanitized).strip("._-")
+        return sanitized[:80]
+
+    def _download_image(self, image_url: str) -> Optional[tuple[bytes, str]]:
+        try:
+            request = Request(
+                image_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "image/*,*/*;q=0.8",
+                },
+            )
+            with urlopen(request, timeout=self.image_timeout_sec) as response:
+                content_type = response.headers.get("Content-Type", "")
+                image_bytes = response.read()
+                return image_bytes, content_type
+        except Exception:
+            return None
+
+    def _resolve_extension(self, image_url: str, content_type: str) -> str:
+        content_type = (content_type or "").split(";")[0].strip().lower()
+        if content_type.startswith("image/"):
+            guessed = mimetypes.guess_extension(content_type)
+            if guessed:
+                ext = guessed.lstrip(".").lower()
+                if ext == "jpe":
+                    return "jpg"
+                return ext
+
+        parsed = urlparse(image_url)
+        suffix = Path(unquote(parsed.path)).suffix.lower().lstrip(".")
+        if suffix in {"png", "jpg", "jpeg", "webp", "gif", "bmp", "svg", "avif"}:
+            return "jpg" if suffix == "jpeg" else suffix
+
+        return "jpg"
+
+    def _extract_image_name_from_url(self, image_url: str, fallback: str) -> str:
+        parsed = urlparse(image_url)
+        raw_name = Path(unquote(parsed.path)).name
+        if raw_name:
+            return raw_name
+        return fallback
+
+    def _safe_text(self, value: str, max_length: int = 400) -> str:
+        text = re.sub(r"\s+", " ", (value or "")).strip()
+        if len(text) <= max_length:
+            return text
+        return text[: max_length - 3].rstrip() + "..."
+
+    def _coerce_int(self, value: Optional[str]) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(str(value).strip())
+        except Exception:
+            return None
     
     def batch_scrape_urls(
         self,
