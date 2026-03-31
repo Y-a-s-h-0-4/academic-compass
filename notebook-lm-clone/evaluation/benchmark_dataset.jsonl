@@ -1,0 +1,3 @@
+{"id":"q1","question":"What is the primary purpose of Academic Compass?","ground_truth":"Academic Compass is an AI-powered learning assistant that uses a frontend and a FastAPI RAG backend to help with coursework and study tasks.","expected_sources":["notes.txt"]}
+{"id":"q2","question":"Which backend framework powers the notebook-lm clone API?","ground_truth":"The backend API is built with FastAPI.","expected_sources":["notes.txt"]}
+{"id":"q3","question":"Name one retrieval or vector component used in this project.","ground_truth":"The project uses ChromaDB for vector storage and retrieval.","expected_sources":["notes.txt"]}

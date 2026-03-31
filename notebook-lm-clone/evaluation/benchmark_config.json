@@ -1,0 +1,27 @@
+{
+  "documents": [
+    "data/notes.txt"
+  ],
+  "judge_model": {
+    "provider": "openai",
+    "model": "gpt-4o-mini"
+  },
+  "models": [
+    {
+      "name": "GPT-4o-mini",
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "modes": ["zero_shot", "rag", "rag_cot"],
+      "temperature": 0.1,
+      "max_tokens": 1000
+    },
+    {
+      "name": "Gemini-2.5-Flash",
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "modes": ["zero_shot", "rag", "rag_cot"],
+      "temperature": 0.1,
+      "max_tokens": 1000
+    }
+  ]
+}
