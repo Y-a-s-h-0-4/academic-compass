@@ -1,4 +1,6 @@
+import json
 import logging
+import re
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 
@@ -18,6 +20,7 @@ class RAGResult:
     sources_used: List[Dict[str, Any]]
     retrieval_count: int
     generation_tokens: Optional[int] = None
+    context_excerpt: Optional[str] = None
     
     def get_citation_summary(self) -> str:
         if not self.sources_used:
@@ -160,7 +163,6 @@ class RAGGenerator:
         total_chars = 0
         for i, result in enumerate(search_results[:max_chunks]):
             citation_info = result['citation']
-            result_metadata = result.get('metadata') or {}
             source_file = citation_info.get('source_file', 'Unknown Source')
             source_type = citation_info.get('source_type', 'unknown')
             page_number = citation_info.get('page_number')
@@ -183,25 +185,176 @@ class RAGGenerator:
                 'chunk_id': result['id'],
                 'relevance_score': result['score']
             }
-
-            asset_type = result_metadata.get('asset_type')
-            if asset_type in {'image', 'table'}:
-                source_info['asset_type'] = asset_type
-                source_info['asset_url'] = result_metadata.get('asset_url')
-                source_info['asset_name'] = result_metadata.get('asset_name')
-
-            if asset_type == 'table' and result_metadata.get('table_preview'):
-                source_info['table_preview'] = result_metadata.get('table_preview')
-
-            if asset_type == 'image':
-                source_info['image_width'] = result_metadata.get('image_width')
-                source_info['image_height'] = result_metadata.get('image_height')
-
             sources_info.append(source_info)
         
         formatted_context = '\n\n'.join(context_parts)
 
         return formatted_context, sources_info
+
+    def _filter_context_by_topic(self, context: str, topic: Optional[str]) -> str:
+        topic_text = (topic or "").strip().lower()
+        if not topic_text or not context.strip():
+            return context
+
+        keywords = [token for token in re.split(r"[^a-z0-9]+", topic_text) if len(token) > 2]
+        if not keywords:
+            return context
+
+        segments = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+|\n{2,}", context) if segment.strip()]
+        matched_segments = [segment for segment in segments if any(keyword in segment.lower() for keyword in keywords)]
+        if not matched_segments:
+            return context
+
+        return "\n\n".join(matched_segments)
+
+    def _normalize_question_types(self, question_types: Optional[List[str]]) -> List[str]:
+        allowed = {
+            "mcq": "mcq",
+            "multiple choice": "mcq",
+            "multiple_choice": "mcq",
+            "short": "short",
+            "short answer": "short",
+            "short_answer": "short",
+            "true_false": "true_false",
+            "true/false": "true_false",
+            "true false": "true_false",
+            "fill_blank": "fill_blank",
+            "fill in the blank": "fill_blank",
+            "fill-in-the-blank": "fill_blank",
+        }
+
+        normalized: List[str] = []
+        for item in question_types or []:
+            key = str(item).strip().lower()
+            mapped = allowed.get(key)
+            if mapped and mapped not in normalized:
+                normalized.append(mapped)
+
+        return normalized or ["mcq"]
+
+    def generate_quiz_from_config(self, config: Dict[str, Any]) -> RAGResult:
+        number_of_questions = int(config.get("number_of_questions") or config.get("num_questions") or 5)
+        number_of_questions = max(3, min(30, number_of_questions))
+
+        difficulty = str(config.get("difficulty") or config.get("quiz_difficulty") or "mixed").strip().lower()
+        if difficulty not in {"easy", "medium", "hard", "mixed"}:
+            difficulty = "mixed"
+
+        question_types = self._normalize_question_types(config.get("question_types"))
+        topic = str(config.get("topic") or config.get("topic_focus") or "").strip()
+        previous_questions = [
+            str(question).strip()
+            for question in (config.get("previous_questions") or config.get("existing_questions") or [])
+            if str(question).strip()
+        ]
+
+        rag_context = str(config.get("rag_context") or "").strip()
+        sources_info: List[Dict[str, Any]] = []
+        retrieval_count = 0
+
+        if not rag_context:
+            retrieval_query = "concepts relationships applications reasoning trade-offs"
+            if topic:
+                retrieval_query = f"{topic} {retrieval_query}"
+
+            query_vector = self.embedding_generator.generate_query_embedding(retrieval_query)
+            search_results = self.vector_db.search(query_vector=query_vector.tolist(), limit=int(config.get("max_chunks") or 12))
+            retrieval_count = len(search_results)
+
+            if not search_results:
+                return RAGResult(
+                    query="Quiz",
+                    response="No documents available.",
+                    sources_used=[],
+                    retrieval_count=0,
+                )
+
+            rag_context, sources_info = self._format_context_with_citations(search_results, int(config.get("max_chunks") or 12), 6000)
+        else:
+            rag_context = self._filter_context_by_topic(rag_context, topic)
+
+        prompt = f"""You are an expert academic quiz generator for university-level students.
+
+You must generate concept-driven questions that improve understanding, not memorization.
+
+Course material comes from a RAG system and may include:
+1. Conceptual text explanations
+2. Table-derived descriptions converted to text
+3. Diagram-derived descriptions converted to text
+
+You must use ONLY the provided RAG context as the knowledge source.
+
+STRICTLY FORBIDDEN:
+1) Questions about document structure, units, modules, sections, or syllabi.
+2) Questions that explicitly reference diagrams, figures, tables, or charts.
+3) Questions that require unseen layout or image content.
+4) Trivial recall questions or copied definitions.
+
+WHAT TO DO:
+1) Treat text as theory and explanation.
+2) Treat table-derived text as comparisons, trends, and relationships.
+3) Treat diagram-derived text as processes, flows, and systems.
+4) Ask why, how, compare, apply, analyze, and reason questions.
+
+DIFFICULTY LOGIC:
+- easy: basic understanding
+- medium: application and comparison
+- hard: analysis, reasoning, multi-step thinking
+- mixed: balanced across all levels
+
+NON-REPETITION:
+- Do not repeat any previous question.
+- Do not test the same concept in the same way.
+- Ensure diversity in concepts and phrasing.
+
+SELF-VALIDATION:
+Before outputting each question, ensure it:
+- tests understanding rather than memory
+- is answerable from the provided context
+- does not mention modules, units, or structure
+- does not reference visuals explicitly
+- is different from previous questions
+- if any check fails, rewrite it
+
+INPUT CONFIG:
+- number_of_questions: {number_of_questions}
+- difficulty: {difficulty}
+- question_types: {", ".join(question_types)}
+- topic: {topic or "None"}
+
+PREVIOUS QUESTIONS:
+{chr(10).join(f"- {question}" for question in previous_questions) if previous_questions else "None"}
+
+RAG CONTEXT:
+{rag_context}
+
+Return JSON only. Use this exact array schema:
+[
+  {{
+    "id": "q1",
+    "type": "mcq",
+    "difficulty": "medium",
+    "concept_tested": "concept name",
+    "question": "question text",
+    "options": {{
+      "A": "...",
+      "B": "...",
+      "C": "...",
+      "D": "..."
+    }},
+    "correct_answer": "A",
+    "explanation": "conceptual explanation"
+  }}
+]"""
+
+        response = self.llm.call(prompt)
+        return RAGResult(
+            query="Quiz",
+            response=response,
+            sources_used=sources_info,
+            retrieval_count=retrieval_count,
+            context_excerpt=rag_context,
+        )
     
     def _create_rag_prompt(self, query: str, context: str) -> str:
         prompt = f"""You are an AI Course Assistant focused on helping with coursework, assignments, and learning materials.
@@ -294,53 +447,42 @@ Please provide a well-structured summary with proper citations:"""
         self,
         num_questions: int = 5,
         max_chunks: int = 12,
+        difficulty: str = "Mixed",
+        question_types: Optional[List[str]] = None,
+        topic_focus: Optional[str] = None,
+        existing_questions: Optional[List[str]] = None,
     ) -> RAGResult:
-        try:
-            query_vector = self.embedding_generator.generate_query_embedding(
-                "key concepts definitions important facts exam topics"
-            )
-            search_results = self.vector_db.search(
-                query_vector=query_vector.tolist(), limit=max_chunks
-            )
-            if not search_results:
-                return RAGResult(
-                    query="Quiz", response="No documents available.", sources_used=[], retrieval_count=0
-                )
-            context, sources_info = self._format_context_with_citations(search_results, max_chunks, 6000)
-            prompt = f"""Generate exactly {num_questions} multiple-choice questions from the following study material.
-
-Return ONLY valid JSON — no markdown, no explanation, no extra text.
-
-Format:
-[
-  {{
-    "question": "...",
-    "options": [
-      {{"id": "a", "text": "...", "isCorrect": false}},
-      {{"id": "b", "text": "...", "isCorrect": true}},
-      {{"id": "c", "text": "...", "isCorrect": false}},
-      {{"id": "d", "text": "...", "isCorrect": false}}
-    ],
-    "explanation": "Brief explanation of the correct answer"
-  }}
-]
-
-STUDY MATERIAL:
-{context}"""
-            response = self.llm.call(prompt)
-            return RAGResult(query="Quiz", response=response, sources_used=sources_info, retrieval_count=len(search_results))
-        except Exception as e:
-            logger.error(f"Error generating quiz: {e}")
-            return RAGResult(query="Quiz", response=f"Error: {e}", sources_used=[], retrieval_count=0)
+        return self.generate_quiz_from_config({
+            "number_of_questions": num_questions,
+            "max_chunks": max_chunks,
+            "difficulty": difficulty,
+            "question_types": question_types,
+            "topic_focus": topic_focus,
+            "existing_questions": existing_questions,
+        })
 
     def generate_flashcards(
         self,
         num_cards: int = 10,
         max_chunks: int = 12,
+        card_mode: str = "Question->Answer",
+        topic_focus: Optional[str] = None,
+        existing_cards: Optional[List[str]] = None,
     ) -> RAGResult:
         try:
+            mode = (card_mode or "Question->Answer").strip()
+            if mode not in {"Term->Definition", "Concept->Explanation", "Question->Answer"}:
+                mode = "Question->Answer"
+
+            focus = (topic_focus or "").strip()
+            prior_cards = [c.strip() for c in (existing_cards or []) if isinstance(c, str) and c.strip()]
+
+            retrieval_query = "definitions concepts terms relationships applications explanations"
+            if focus:
+                retrieval_query = f"{focus} {retrieval_query}"
+
             query_vector = self.embedding_generator.generate_query_embedding(
-                "definitions concepts terms important facts explanations"
+                retrieval_query
             )
             search_results = self.vector_db.search(
                 query_vector=query_vector.tolist(), limit=max_chunks
@@ -350,7 +492,27 @@ STUDY MATERIAL:
                     query="Flashcards", response="No documents available.", sources_used=[], retrieval_count=0
                 )
             context, sources_info = self._format_context_with_citations(search_results, max_chunks, 6000)
-            prompt = f"""Generate exactly {num_cards} flashcards from the study material below.
+            prior_text = "\n".join([f"- {c}" for c in prior_cards]) if prior_cards else "None"
+            focus_instruction = focus if focus else "Use the most relevant concepts from retrieved material."
+
+            prompt = f"""You are an expert academic flashcard generator for university-level students.
+
+Generate concept-driven flashcards that improve understanding rather than memorization.
+
+RULES:
+- Use only the provided context.
+- Do not mention modules/sections/syllabus.
+- Do not reference diagrams/figures/tables directly.
+- Convert table/diagram-derived text into conceptual relationships, flows, and reasoning prompts.
+- Avoid trivial one-word recall prompts.
+- Do not repeat existing cards.
+
+INPUT SETTINGS:
+- Number of cards: {num_cards}
+- Card mode: {mode}
+- Topic focus: {focus_instruction}
+- Existing cards (must not be repeated):
+{prior_text}
 
 Return ONLY valid JSON — no markdown, no explanation, no extra text.
 
@@ -359,7 +521,7 @@ Format:
   {{"front": "Question or term", "back": "Answer or definition"}}
 ]
 
-STUDY MATERIAL:
+COURSE MATERIAL (RAG):
 {context}"""
             response = self.llm.call(prompt)
             return RAGResult(query="Flashcards", response=response, sources_used=sources_info, retrieval_count=len(search_results))
@@ -382,9 +544,8 @@ STUDY MATERIAL:
             )
             difficulty_label = (difficulty_level or "Intermediate").strip() or "Intermediate"
 
-            query_vector = self.embedding_generator.generate_query_embedding(
-                f"{topic_label} {objective_label} main topics subtopics hierarchy structure prerequisites relationships examples formulas"
-            )
+            retrieval_query = f"{topic_label} main topics subtopics hierarchy structure relationships processes"
+            query_vector = self.embedding_generator.generate_query_embedding(retrieval_query)
             search_results = self.vector_db.search(
                 query_vector=query_vector.tolist(), limit=max_chunks
             )
@@ -393,130 +554,170 @@ STUDY MATERIAL:
                     query="Mind Map", response="No documents available.", sources_used=[], retrieval_count=0
                 )
             context, sources_info = self._format_context_with_citations(search_results, max_chunks, 6000)
-            prompt = f"""You are a mind map generation expert for an educational RAG system.
-Generate comprehensive, well-structured mind maps that transform academic content into visual, hierarchical knowledge structures optimized for student learning.
+            prompt = f"""You are an expert academic mind map architect.
 
-INPUTS:
-- Topic/Title: {topic_label}
-- Source Content: RAG-retrieved material below with citations [1], [2], ...
-- Difficulty Level: {difficulty_label}
-- Learning Objective: {objective_label}
+Create a richly structured conceptual mind map that helps university students understand relationships, flow, and hierarchy.
 
-STRICT REQUIREMENTS:
-1) Use ONLY facts grounded in the provided source content. No hallucinations.
-2) Use domain-accurate terminology from the sources.
-3) Hierarchy depth must be 3-4 levels maximum.
-4) Central node + 4-7 primary branches.
-5) Each primary branch has 2-4 sub-branches.
-6) Node labels must be short phrases (1-3 words).
-7) Include prerequisites, quiz anchors, revision hooks, and labeled relationships.
-8) Include 1-2 real-world applications.
-9) Include formulas/equations when relevant.
-10) Ensure balance and logical progression from foundational to advanced.
+STRICT RULES:
+- Output ONLY valid JSON.
+- Do not mention module/unit/section structure.
+- Do not mention diagrams, figures, tables, or charts explicitly.
+- Every node must be grounded in the provided course material.
+- Use short labels (2-5 words).
+- Root must represent the topic.
+- Level 1 branches: 4 to 7 nodes.
+- Level 2 nodes: 2 to 5 per branch.
+- Level 3 nodes: 1 to 3 per sub-branch.
 
-OUTPUT FORMAT:
-Return ONLY valid JSON (no markdown, no prose outside JSON) with this exact top-level structure:
-{{
-    "mindmap": {{
-        "title": "...",
-        "difficulty_level": "Basic|Intermediate|Advanced",
-        "learning_objective": "...",
-        "central_node": {{
-            "text": "...",
-            "description": "...",
-            "source_refs": ["[1]"]
-        }},
-        "branches": [
-            {{
-                "id": "branch-1",
-                "level": 2,
-                "text": "...",
-                "description": "...",
-                "source_refs": ["[1]", "[2]"],
-                "sub_branches": [
-                    {{
-                        "id": "branch-1-sub-1",
-                        "level": 3,
-                        "text": "...",
-                        "details": "...",
-                        "source_refs": ["[2]"],
-                        "connections": [
-                            {{ "to": "branch-2-sub-1", "relationship": "depends-on" }}
-                        ],
-                        "leaf_nodes": [
-                            {{
-                                "id": "branch-1-sub-1-leaf-1",
-                                "level": 4,
-                                "text": "...",
-                                "details": "...",
-                                "source_refs": ["[3]"]
-                            }}
-                        ]
-                    }}
-                ]
-            }}
-        ],
-        "learning_notes": {{
-            "prerequisites": ["..."],
-            "quiz_anchors": ["..."],
-            "revision_hooks": ["..."],
-            "key_relationships": ["A -> B (depends-on)"]
-        }},
-        "validation_checklist": {{
-            "all_information_sourced": true,
-            "no_contradictions": true,
-            "central_topic_clear": true,
-            "primary_branch_count_valid": true,
-            "short_node_labels": true,
-            "real_world_examples_included": true,
-            "learning_objectives_addressed": true,
-            "prerequisites_identified": true,
-            "relationships_labeled": true,
-            "depth_within_limits": true,
-            "terminology_matches_sources": true
-        }},
-        "evaluation_metrics": {{
-            "accuracy": 0,
-            "completeness": 0,
-            "clarity": 0,
-            "structure": 0,
-            "usability": 0
-        }}
-    }},
-    "mermaid": "mindmap\\n  root((Topic))\\n    BranchA\\n      SubA",
-    "ascii": "Topic\\n|- Branch A\\n|  |- Sub A",
-    "render_tree": {{
-        "id": "root",
-        "label": "...",
-        "children": [
-            {{
-                "id": "branch-1",
-                "label": "...",
-                "children": [
-                    {{ "id": "branch-1-sub-1", "label": "...", "children": [] }}
-                ]
-            }}
-        ]
-    }}
-}}
+User Prompt:
+Generate a mind map for the topic: "{topic_label}"
 
-VALIDATION TARGETS:
-- 4-7 primary branches
-- 2-4 sub-branches per primary branch
-- 1-3 words per node label
-- 3-4 depth levels maximum
-- include source_refs for factual nodes
-- include at least 2 real-world applications when supported by sources
+Learning objective: {objective_label}
+Difficulty target: {difficulty_label}
 
-SOURCE MATERIAL (use citations exactly as provided):
+COURSE MATERIAL:
 {context}
 
-Generate the JSON now."""
+Return JSON with this exact structure:
+{{
+  "id": "root",
+  "label": "{topic_label}",
+  "children": [
+    {{
+      "id": "branch_1",
+      "label": "Main Idea",
+      "children": [
+        {{
+          "id": "sub_1_1",
+          "label": "Key Concept",
+          "children": [
+            {{"id": "leaf_1_1_1", "label": "Specific Detail", "children": []}}
+          ]
+        }}
+      ]
+    }}
+  ]
+}}"""
             response = self.llm.call(prompt)
             return RAGResult(query="Mind Map", response=response, sources_used=sources_info, retrieval_count=len(search_results))
         except Exception as e:
             logger.error(f"Error generating mindmap: {e}")
-            return RAGResult(query="Mind Map", response=f"Error: {e}", sources_used=[], retrieval_count=0)
+            fallback = {
+                "id": "root",
+                "label": topic_label if 'topic_label' in locals() else "Mind Map",
+                "children": []
+            }
+            return RAGResult(query="Mind Map", response=json.dumps(fallback), sources_used=[], retrieval_count=0)
+
+        def generate_session_feedback_report(
+                self,
+                session_questions: List[Dict[str, Any]],
+                retrieved_context_chunks: Optional[List[str]] = None,
+                topic: Optional[str] = None,
+                course_name: Optional[str] = None,
+                previous_score: Optional[float] = None,
+        ) -> RAGResult:
+                try:
+                        topic_label = (topic or "General Topic").strip() or "General Topic"
+                        course_label = (course_name or "Course Session").strip() or "Course Session"
+                        previous_score_text = "None" if previous_score is None else str(round(float(previous_score), 2))
+
+                        context_chunks = [
+                                str(chunk).strip()
+                                for chunk in (retrieved_context_chunks or [])
+                                if str(chunk).strip()
+                        ]
+                        context_text = "\n\n".join(context_chunks[:20]) if context_chunks else "No additional context provided."
+
+                        prompt = f"""You are a personalised academic feedback agent.
+
+Goal:
+- Transform quiz outcomes into actionable, concept-level feedback.
+- Focus on conceptual understanding and learning improvement.
+
+Input Metadata:
+- Course: {course_label}
+- Topic: {topic_label}
+- Previous score (%): {previous_score_text}
+
+Session Questions and Evaluations (JSON):
+{json.dumps(session_questions)}
+
+Retrieved Course Context:
+{context_text}
+
+Required output JSON schema:
+{{
+    "question_results": [
+        {{
+            "question_index": 1,
+            "question": "string",
+            "what_you_got_right": ["string"],
+            "what_was_incorrect": [
+                {{ "student_claim": "string", "correction": "string" }}
+            ],
+            "what_you_missed": ["string"],
+            "question_tip": "string"
+        }}
+    ],
+    "performance_summary": {{
+        "overall_score": 0,
+        "overall_percentage": 0,
+        "fully_correct_count": 0,
+        "partially_correct_count": 0,
+        "incorrect_count": 0,
+        "estimated_conceptual_coverage": "string",
+        "one_sentence_assessment": "string"
+    }},
+    "strength_areas": [
+        {{ "concept": "string", "evidence": "string", "acknowledgement": "string" }}
+    ],
+    "weak_areas": [
+        {{ "concept": "string", "description": "string", "exposed_by": "string", "significance": "string" }}
+    ],
+    "improvement_plan": [
+        {{
+            "concept": "string",
+            "study_suggestion": "string",
+            "activity_type": "quiz",
+            "difficulty_level": "Medium",
+            "resource_type": "topic practice",
+            "system_action": {{
+                "action_type": "quiz",
+                "label": "Practice this concept",
+                "settings": {{ "topic": "string", "difficulty": "medium" }}
+            }}
+        }}
+    ],
+    "next_step": "string",
+    "learning_trend": "improved"
+}}
+
+Rules:
+1) Output only JSON, no markdown or explanation.
+2) Use concise academic tone.
+3) "what_was_incorrect" must show claim-vs-correction pairs.
+4) "question_tip" must be one sentence.
+5) "learning_trend" must be one of: improved, declined, stable.
+6) Suggestions in improvement_plan must be actionable and specific.
+"""
+
+                        response = self.llm.call(prompt)
+                        return RAGResult(
+                                query="Session Feedback Report",
+                                response=response,
+                                sources_used=[],
+                                retrieval_count=0,
+                                context_excerpt=context_text,
+                        )
+                except Exception as e:
+                        logger.error(f"Error generating session feedback report: {e}")
+                        return RAGResult(
+                                query="Session Feedback Report",
+                                response=f"Error: {e}",
+                                sources_used=[],
+                                retrieval_count=0,
+                        )
 
 
 if __name__ == "__main__":

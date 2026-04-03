@@ -1,87 +1,72 @@
 import { motion } from "framer-motion";
-import { TrendingUp, TrendingDown, Minus, Target, Brain, AlertCircle } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 
-interface FeedbackCardProps {
-  type: "strength" | "weakness" | "missed";
-  topic: string;
-  description: string;
-  trend?: "up" | "down" | "stable";
-  confidence?: number;
+export interface QuestionFeedbackPayload {
+  what_you_got_right: string[];
+  what_was_incorrect: Array<{ student_claim: string; correction: string }>;
+  what_you_missed: string[];
+  question_tip: string;
 }
 
-const typeConfig = {
-  strength: {
-    icon: TrendingUp,
-    label: "Strength",
-    color: "bg-success/10 text-success border-success/20",
-    iconColor: "text-success",
-  },
-  weakness: {
-    icon: AlertCircle,
-    label: "Needs Work",
-    color: "bg-warning/10 text-warning border-warning/20",
-    iconColor: "text-warning",
-  },
-  missed: {
-    icon: Brain,
-    label: "Missed Concept",
-    color: "bg-destructive/10 text-destructive border-destructive/20",
-    iconColor: "text-destructive",
-  },
+interface FeedbackCardProps {
+  feedback: QuestionFeedbackPayload;
+}
+
+const BulletList = ({ items }: { items: string[] }) => {
+  if (!items.length) {
+    return <p className="text-xs text-muted-foreground">No items detected for this section.</p>;
+  }
+
+  return (
+    <ul className="list-disc pl-4 space-y-1 text-sm text-foreground/90">
+      {items.map((item, index) => (
+        <li key={`${item}-${index}`}>{item}</li>
+      ))}
+    </ul>
+  );
 };
 
-export const FeedbackCard = ({
-  type,
-  topic,
-  description,
-  trend,
-  confidence,
-}: FeedbackCardProps) => {
-  const config = typeConfig[type];
-  const Icon = config.icon;
-
-  const TrendIcon = trend === "up" ? TrendingUp : trend === "down" ? TrendingDown : Minus;
+export const FeedbackCard = ({ feedback }: FeedbackCardProps) => {
+  const right = Array.isArray(feedback.what_you_got_right) ? feedback.what_you_got_right : [];
+  const missed = Array.isArray(feedback.what_you_missed) ? feedback.what_you_missed : [];
+  const incorrect = Array.isArray(feedback.what_was_incorrect) ? feedback.what_was_incorrect : [];
+  const tip = (feedback.question_tip || "Review the concept and solve one similar question.").trim();
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 10 }}
+      initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
-      whileHover={{ scale: 1.02 }}
-      className={`p-4 rounded-xl border ${config.color} transition-all`}
+      className="rounded-xl border border-border/70 bg-card/80 p-4 space-y-3"
     >
-      <div className="flex items-start justify-between mb-3">
-        <div className="flex items-center gap-2">
-          <Icon className={`w-5 h-5 ${config.iconColor}`} />
-          <Badge variant="secondary" className="text-xs">
-            {config.label}
-          </Badge>
-        </div>
-        {trend && (
-          <div className="flex items-center gap-1 text-xs text-muted-foreground">
-            <TrendIcon className="w-3.5 h-3.5" />
-            <span>{trend === "up" ? "Improving" : trend === "down" ? "Declining" : "Stable"}</span>
-          </div>
+      <div>
+        <p className="text-sm font-semibold text-green-700">What you got right</p>
+        <BulletList items={right} />
+      </div>
+
+      <div>
+        <p className="text-sm font-semibold text-red-700">What was incorrect</p>
+        {incorrect.length === 0 ? (
+          <p className="text-xs text-muted-foreground">No incorrect claims identified.</p>
+        ) : (
+          <ul className="space-y-2 text-sm">
+            {incorrect.map((item, index) => (
+              <li key={`${item.student_claim}-${index}`} className="rounded-md border border-red-200/70 bg-red-50/40 p-2">
+                <p className="text-foreground"><span className="font-medium">Claim:</span> {item.student_claim}</p>
+                <p className="text-foreground"><span className="font-medium">Correction:</span> {item.correction}</p>
+              </li>
+            ))}
+          </ul>
         )}
       </div>
 
-      <h4 className="font-serif text-lg text-foreground mb-2">{topic}</h4>
-      <p className="text-sm text-muted-foreground mb-3">{description}</p>
+      <div>
+        <p className="text-sm font-semibold text-amber-700">What you missed</p>
+        <BulletList items={missed} />
+      </div>
 
-      {confidence !== undefined && (
-        <div className="flex items-center gap-2">
-          <Target className="w-4 h-4 text-muted-foreground" />
-          <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
-            <motion.div
-              className="h-full bg-primary"
-              initial={{ width: 0 }}
-              animate={{ width: `${confidence}%` }}
-              transition={{ duration: 0.5, delay: 0.2 }}
-            />
-          </div>
-          <span className="text-xs text-muted-foreground">{confidence}%</span>
-        </div>
-      )}
+      <div className="rounded-md border border-primary/20 bg-primary/5 p-3">
+        <p className="text-sm font-semibold text-primary">Tip</p>
+        <p className="text-sm text-foreground/90">{tip}</p>
+      </div>
     </motion.div>
   );
 };
