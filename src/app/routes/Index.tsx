@@ -12,7 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { PanelRight, Plus, BookOpen, Send, Loader2, Play, Pause, SkipBack, SkipForward, Mic, MicOff, ArrowDown, Sun, Moon, FileUp, Globe, X, Paperclip, GraduationCap, HelpCircle, Layers, Network, FileText, ExternalLink, Trash2 } from "lucide-react";
+import { PanelRight, Plus, BookOpen, Send, Loader2, Play, Pause, SkipBack, SkipForward, Mic, MicOff, ArrowDown, Sun, Moon, FileUp, Globe, X, Paperclip, GraduationCap, HelpCircle, Layers, Network, FileText, ExternalLink, Trash2, Timer, RotateCcw } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import UserProfile from "@/components/UserProfile";
 import { useUserContext } from "@/context/UserContext";
@@ -78,6 +78,21 @@ const initialChats: ChatItem[] = [
 
 const CHAT_STATE_STORAGE_PREFIX = "academic-compass:chat-state:v1";
 const NOTEBOOK_API_URL = ((import.meta.env.VITE_NOTEBOOK_API_URL as string | undefined)?.trim() || "").replace(/\/$/, "");
+const VOICE_END_INTENT_PHRASES = [
+  "thank you",
+  "lets end this",
+  "let's end this",
+  "goodbye",
+  "stop listening",
+  "end chat",
+];
+
+const normalizeVoiceText = (value: string) =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 
 const buildChatMessagesMap = (chatItems: ChatItem[]) =>
   chatItems.reduce((acc, chat) => {
@@ -401,12 +416,20 @@ const Index = () => {
   const [transcript, setTranscript] = useState("");
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [theme, setTheme] = useState<"light" | "dark">("dark");
+  const [courseTimers, setCourseTimers] = useState<Record<string, number>>({});
+  const [runningCourseTimerId, setRunningCourseTimerId] = useState<string | null>(null);
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const mainAudioRef = useRef<HTMLAudioElement>(null);
   const recognitionRef = useRef<any>(null);
-  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const voiceTextRef = useRef<string>("");
+  const voiceSessionActiveRef = useRef(false);
+  const shouldResumeListeningAfterPlaybackRef = useRef(false);
+  const endIntentDetectedRef = useRef(false);
+  const audioPlaybackActiveRef = useRef(false);
+  const hasAssistantAudioInTurnRef = useRef(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
@@ -453,6 +476,11 @@ const Index = () => {
       silenceTimerRef.current = null;
     }
 
+    if (autoRestartTimerRef.current) {
+      clearTimeout(autoRestartTimerRef.current);
+      autoRestartTimerRef.current = null;
+    }
+
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -463,6 +491,11 @@ const Index = () => {
 
     setIsListening(false);
     voiceTextRef.current = "";
+    voiceSessionActiveRef.current = false;
+    shouldResumeListeningAfterPlaybackRef.current = false;
+    endIntentDetectedRef.current = false;
+    audioPlaybackActiveRef.current = false;
+    hasAssistantAudioInTurnRef.current = false;
   };
 
   const createCourse = (title?: string) => {
@@ -803,8 +836,29 @@ const Index = () => {
     loadHistory();
   }, [userId, activeChatId]);
 
+  const clearAutoRestartTimer = () => {
+    if (autoRestartTimerRef.current) {
+      clearTimeout(autoRestartTimerRef.current);
+      autoRestartTimerRef.current = null;
+    }
+  };
+
   // Voice input handler
-  const startVoiceInput = () => {
+  const startVoiceInput = (options: { enableVoiceSession?: boolean } = {}) => {
+    const { enableVoiceSession = false } = options;
+
+    if (enableVoiceSession) {
+      voiceSessionActiveRef.current = true;
+      shouldResumeListeningAfterPlaybackRef.current = true;
+      endIntentDetectedRef.current = false;
+    }
+
+    if (audioPlaybackActiveRef.current || isStreaming) {
+      return;
+    }
+
+    clearAutoRestartTimer();
+
     if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
       alert("Speech recognition not supported in this browser");
       return;
@@ -840,6 +894,22 @@ const Index = () => {
         }
       }
       
+      const combinedTranscript = `${voiceTextRef.current} ${finalTranscript}`.trim();
+      const normalizedCombinedTranscript = normalizeVoiceText(combinedTranscript);
+      const hasEndIntent = VOICE_END_INTENT_PHRASES.some((phrase) =>
+        normalizedCombinedTranscript.includes(normalizeVoiceText(phrase))
+      );
+
+      if (hasEndIntent) {
+        endIntentDetectedRef.current = true;
+        shouldResumeListeningAfterPlaybackRef.current = false;
+        setQueryText("");
+        setTranscript("");
+        voiceTextRef.current = "";
+        stopVoiceInput({ disableVoiceSession: true, cancelPendingRestart: true });
+        return;
+      }
+
       // Update the voice text with final results only
       if (finalTranscript) {
         voiceTextRef.current += finalTranscript;
@@ -853,7 +923,7 @@ const Index = () => {
       
       // Set 2-second silence timeout to auto-submit
       silenceTimerRef.current = setTimeout(() => {
-        stopVoiceInput();
+        stopVoiceInput({ disableVoiceSession: false, cancelPendingRestart: true });
         // Auto-submit after 2 seconds of silence
         setTimeout(() => {
           const finalText = voiceTextRef.current.trim();
@@ -877,13 +947,122 @@ const Index = () => {
     recognition.start();
   };
 
-  const stopVoiceInput = () => {
+  const stopVoiceInput = (
+    options: { disableVoiceSession?: boolean; cancelPendingRestart?: boolean } = {}
+  ) => {
+    const { disableVoiceSession = false, cancelPendingRestart = true } = options;
+
+    if (disableVoiceSession) {
+      voiceSessionActiveRef.current = false;
+      shouldResumeListeningAfterPlaybackRef.current = false;
+      endIntentDetectedRef.current = false;
+    }
+
+    if (cancelPendingRestart) {
+      clearAutoRestartTimer();
+    }
+
     if (recognitionRef.current) {
       recognitionRef.current.stop();
     }
     setIsListening(false);
-    if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
   };
+
+  const scheduleVoiceRestartAfterPlayback = () => {
+    clearAutoRestartTimer();
+
+    autoRestartTimerRef.current = setTimeout(() => {
+      if (
+        !voiceSessionActiveRef.current ||
+        !shouldResumeListeningAfterPlaybackRef.current ||
+        endIntentDetectedRef.current ||
+        audioPlaybackActiveRef.current ||
+        isListening
+      ) {
+        return;
+      }
+
+      startVoiceInput({ enableVoiceSession: false });
+    }, 300);
+  };
+
+  const handleSkipCurrentAudio = () => {
+    const player = mainAudioRef.current;
+    if (player) {
+      try {
+        player.pause();
+        player.currentTime = 0;
+        player.removeAttribute("src");
+        player.load();
+      } catch {
+        // Best-effort cleanup; keep UI responsive even if media API fails.
+      }
+    }
+
+    setCurrentAudioUrl(null);
+    audioPlaybackActiveRef.current = false;
+
+    if (
+      voiceSessionActiveRef.current &&
+      shouldResumeListeningAfterPlaybackRef.current &&
+      !endIntentDetectedRef.current
+    ) {
+      scheduleVoiceRestartAfterPlayback();
+    }
+  };
+
+  const formatTimer = (totalSeconds: number) => {
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    return `${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  };
+
+  const toggleCourseTimer = (contextId: string) => {
+    setRunningCourseTimerId((current) => (current === contextId ? null : contextId));
+  };
+
+  const resetActiveContextTimer = () => {
+    if (!activeContextId) return;
+
+    setCourseTimers((prev) => ({
+      ...prev,
+      [activeContextId]: 0,
+    }));
+    setRunningCourseTimerId((current) => (current === activeContextId ? null : current));
+  };
+
+  useEffect(() => {
+    if (!runningCourseTimerId) return;
+
+    const intervalId = setInterval(() => {
+      setCourseTimers((prev) => ({
+        ...prev,
+        [runningCourseTimerId]: (prev[runningCourseTimerId] || 0) + 1,
+      }));
+    }, 1000);
+
+    return () => clearInterval(intervalId);
+  }, [runningCourseTimerId]);
+
+  const activeChat = chats.find((chat) => chat.id === activeChatId) || null;
+
+  const activeCourse = (() => {
+    if (activePage.startsWith("course-")) {
+      const pageCourseId = activePage.replace("course-", "");
+      return courses.find((course) => course.id === pageCourseId) || null;
+    }
+
+    if (!activeChat?.courseId) return null;
+    return courses.find((course) => course.id === activeChat.courseId) || null;
+  })();
+
+  const activeContextId = activeCourse?.id || (activeChat ? `chat:${activeChat.id}` : null);
+  const headerTitle = activeCourse?.title || activeChat?.title || "No Course Opened";
+  const activeCourseElapsed = activeContextId ? (courseTimers[activeContextId] || 0) : 0;
 
   const handleQuerySubmitWithText = async (text: string) => {
     if (!text.trim()) return;
@@ -927,6 +1106,17 @@ const Index = () => {
     setQueryLoading(true);
     setIsStreaming(true);
     setCitations([]);
+    hasAssistantAudioInTurnRef.current = false;
+
+    if (voiceSessionActiveRef.current && !endIntentDetectedRef.current) {
+      shouldResumeListeningAfterPlaybackRef.current = true;
+    }
+
+    clearAutoRestartTimer();
+
+    if (currentAudioUrl) {
+      setCurrentAudioUrl(null);
+    }
     
     // Prepare assistant message placeholder
     const assistantMessageId = (Date.now() + 1).toString();
@@ -958,6 +1148,9 @@ const Index = () => {
         },
         (audioFile) => {
           // Handle audio file - auto-play immediately
+          hasAssistantAudioInTurnRef.current = true;
+          audioPlaybackActiveRef.current = true;
+          stopVoiceInput({ disableVoiceSession: false, cancelPendingRestart: true });
           const audioUrl = audioFile.startsWith('http') ? audioFile : `http://localhost:8000${audioFile}`;
           setCurrentAudioUrl(audioUrl);
         },
@@ -986,6 +1179,15 @@ const Index = () => {
             content: fullAnswer,
             sources: currentSourcesRef.current,
           }).catch((err) => console.error("Failed to save assistant message:", err));
+
+          if (
+            !hasAssistantAudioInTurnRef.current &&
+            voiceSessionActiveRef.current &&
+            shouldResumeListeningAfterPlaybackRef.current &&
+            !endIntentDetectedRef.current
+          ) {
+            scheduleVoiceRestartAfterPlayback();
+          }
           
           inputRef.current?.focus();
         }
@@ -1005,6 +1207,14 @@ const Index = () => {
         const withoutLast = prev.filter(m => m.id !== assistantMessageId);
         return [...withoutLast, errorMessage];
       });
+
+      if (
+        voiceSessionActiveRef.current &&
+        shouldResumeListeningAfterPlaybackRef.current &&
+        !endIntentDetectedRef.current
+      ) {
+        scheduleVoiceRestartAfterPlayback();
+      }
     }
   };
 
@@ -1618,6 +1828,23 @@ const Index = () => {
               </AnimatePresence>
             </div>
 
+            {/* Skip audio control above input separator */}
+            <div className="flex-shrink-0 bg-background/80 px-4 pb-2">
+              <div className="max-w-3xl mx-auto flex justify-end">
+                <Button
+                  onClick={handleSkipCurrentAudio}
+                  disabled={!currentAudioUrl}
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-[11px]"
+                  title="Skip current audio"
+                >
+                  <SkipForward className="w-3.5 h-3.5 mr-1" />
+                  Skip Audio
+                </Button>
+              </div>
+            </div>
+
             {/* Input Area - Fixed at bottom */}
             <div className="flex-shrink-0 border-t border-border bg-background/80 backdrop-blur-sm">
               <div className="max-w-3xl mx-auto p-4">
@@ -1691,7 +1918,22 @@ const Index = () => {
                     ref={mainAudioRef} 
                     src={currentAudioUrl}
                     autoPlay
-                    onEnded={() => setCurrentAudioUrl(null)}
+                    onEnded={() => {
+                      setCurrentAudioUrl(null);
+                      audioPlaybackActiveRef.current = false;
+
+                      if (
+                        voiceSessionActiveRef.current &&
+                        shouldResumeListeningAfterPlaybackRef.current &&
+                        !endIntentDetectedRef.current
+                      ) {
+                        scheduleVoiceRestartAfterPlayback();
+                      }
+                    }}
+                    onError={() => {
+                      setCurrentAudioUrl(null);
+                      audioPlaybackActiveRef.current = false;
+                    }}
                     className="hidden"
                   />
                 )}
@@ -1762,7 +2004,14 @@ const Index = () => {
                     rows={1}
                   />
                   <Button
-                    onClick={isListening ? stopVoiceInput : startVoiceInput}
+                    onClick={() => {
+                      if (isListening) {
+                        stopVoiceInput({ disableVoiceSession: true, cancelPendingRestart: true });
+                        return;
+                      }
+
+                      startVoiceInput({ enableVoiceSession: true });
+                    }}
                     disabled={!userId}
                     size="icon"
                     className={`h-[52px] w-[52px] flex-shrink-0 ${isListening ? "bg-red-500 hover:bg-red-600" : ""}`}
@@ -1834,18 +2083,20 @@ const Index = () => {
                     </PopoverContent>
                   </Popover>
 
-                  <Button
-                    onClick={handleQuerySubmit}
-                    disabled={queryLoading || !queryText.trim() || !userId}
-                    size="icon"
-                    className="h-[52px] w-[52px] flex-shrink-0"
-                  >
-                    {queryLoading ? (
-                      <Loader2 className="w-5 h-5 animate-spin" />
-                    ) : (
-                      <Send className="w-5 h-5" />
-                    )}
-                  </Button>
+                  <div className="self-end">
+                    <Button
+                      onClick={handleQuerySubmit}
+                      disabled={queryLoading || !queryText.trim() || !userId}
+                      size="icon"
+                      className="h-[52px] w-[52px] flex-shrink-0"
+                    >
+                      {queryLoading ? (
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                      ) : (
+                        <Send className="w-5 h-5" />
+                      )}
+                    </Button>
+                  </div>
                 </div>
 
                 <Dialog open={Boolean(zoomedImageUrl)} onOpenChange={(open) => !open && setZoomedImageUrl(null)}>
@@ -1958,10 +2209,34 @@ const Index = () => {
       <main className="flex-1 flex flex-col overflow-hidden relative min-h-0">
         <header className="flex-shrink-0 flex items-center justify-between px-6 py-4 border-b border-border bg-background/80 backdrop-blur z-30">
           <div>
-            <p className="font-serif text-2xl text-foreground">Academic Compass</p>
-            <p className="text-sm text-muted-foreground">Your guided learning companion</p>
+            <p className="font-serif text-2xl text-foreground">{headerTitle}</p>
           </div>
           <div className="flex items-center gap-3">
+            {activeContextId && (
+              <div className="flex items-center gap-2">
+                <Button
+                  variant={runningCourseTimerId === activeContextId ? "secondary" : "outline"}
+                  size="sm"
+                  className="shrink-0"
+                  onClick={() => toggleCourseTimer(activeContextId)}
+                  title={`${runningCourseTimerId === activeContextId ? "Pause" : "Start"} timer for ${headerTitle}`}
+                >
+                  <Timer className="w-4 h-4 mr-2" />
+                  {formatTimer(activeCourseElapsed)}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-8 w-8 shrink-0"
+                  onClick={resetActiveContextTimer}
+                  title={`Reset timer for ${headerTitle}`}
+                  aria-label="Reset active timer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                </Button>
+              </div>
+            )}
+
             <Button
               variant="outline"
               size="icon"

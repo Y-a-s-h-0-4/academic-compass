@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from firecrawl import Firecrawl
 from src.document_processing.doc_processor import DocumentChunk
+from src.embeddings.gemini_image_analyzer import GeminiImageMetadataAnalyzer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,6 +38,10 @@ class WebScraper:
         api_key: str,
         outputs_dir: str = "./outputs",
         asset_subdir: str = "assets",
+        gemini_api_key: Optional[str] = None,
+        image_metadata_model: Optional[str] = None,
+        image_metadata_timeout_sec: Optional[float] = None,
+        image_max_caption_chars: Optional[int] = None,
         max_images_per_page: int = 15,
         min_image_bytes: int = 1024,
         image_timeout_sec: int = 8,
@@ -48,6 +53,12 @@ class WebScraper:
         self.max_images_per_page = max_images_per_page
         self.min_image_bytes = min_image_bytes
         self.image_timeout_sec = image_timeout_sec
+        self.image_metadata_analyzer = GeminiImageMetadataAnalyzer(
+            api_key=gemini_api_key,
+            model_name=image_metadata_model,
+            timeout_sec=image_metadata_timeout_sec,
+            max_caption_chars=image_max_caption_chars,
+        )
 
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         self.assets_output_dir.mkdir(parents=True, exist_ok=True)
@@ -273,6 +284,19 @@ class WebScraper:
                 "image_title": image_title,
                 "image_hash": image_hash[:12],
             }
+
+            if self.image_metadata_analyzer.enabled:
+                analysis = self.image_metadata_analyzer.analyze_image(
+                    image_path=str(image_path),
+                    source_name=page_data.title,
+                    page_context=page_data.content[:1000],
+                    hint_text=f"alt={image_alt}; title={image_title}",
+                )
+                if analysis:
+                    metadata["gemini_caption"] = analysis.caption
+                    metadata["image_content_type"] = analysis.content_type
+                    metadata["image_concepts"] = "|".join(analysis.concepts)
+                    metadata["gemini_confidence"] = analysis.confidence
             if width is not None:
                 metadata["image_width"] = width
             if height is not None:

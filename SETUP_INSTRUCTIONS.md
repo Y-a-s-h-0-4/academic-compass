@@ -33,6 +33,11 @@ VITE_NOTEBOOK_API_URL=http://localhost:8000
 # Gemini API
 GEMINI_API_KEY=your_gemini_api_key_here
 
+# Optional: improve extracted image relevance using Gemini metadata
+GEMINI_IMAGE_METADATA_MODEL=gemini-2.0-flash
+GEMINI_IMAGE_METADATA_TIMEOUT_SEC=8
+GEMINI_IMAGE_MAX_CAPTION_CHARS=500
+
 # Firecrawl (for web scraping)
 FIRECRAWL_API_KEY=your_firecrawl_api_key_here
 

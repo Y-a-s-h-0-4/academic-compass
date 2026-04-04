@@ -48,6 +48,9 @@ FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
 DB_URL = os.getenv("SUPABASE_DB_URL") or os.getenv("SUPABASE_POSTGRES_URL") or os.getenv("DATABASE_URL")
 LLM_PROVIDER = (os.getenv("LLM_PROVIDER") or "").strip().lower() or None
 LLM_MODEL = (os.getenv("LLM_MODEL") or "").strip() or None
+GEMINI_IMAGE_METADATA_MODEL = (os.getenv("GEMINI_IMAGE_METADATA_MODEL") or "").strip() or None
+GEMINI_IMAGE_METADATA_TIMEOUT_SEC = os.getenv("GEMINI_IMAGE_METADATA_TIMEOUT_SEC")
+GEMINI_IMAGE_MAX_CAPTION_CHARS = os.getenv("GEMINI_IMAGE_MAX_CAPTION_CHARS")
 
 logger.info(f"Environment loaded - DB_URL present: {bool(DB_URL)}")
 
@@ -690,9 +693,20 @@ class LearningScoreSubmissionRequest(BaseModel):
 
 
 # Shared components and per-user pipelines
-doc_processor = DocumentProcessor()
+doc_processor = DocumentProcessor(
+    gemini_api_key=GEMINI_API_KEY or None,
+    image_metadata_model=GEMINI_IMAGE_METADATA_MODEL,
+    image_metadata_timeout_sec=float(GEMINI_IMAGE_METADATA_TIMEOUT_SEC) if GEMINI_IMAGE_METADATA_TIMEOUT_SEC else None,
+    image_max_caption_chars=int(GEMINI_IMAGE_MAX_CAPTION_CHARS) if GEMINI_IMAGE_MAX_CAPTION_CHARS else None,
+)
 embedding_generator = EmbeddingGenerator()
-web_scraper = WebScraper(FIRECRAWL_API_KEY) if FIRECRAWL_API_KEY else None
+web_scraper = WebScraper(
+    FIRECRAWL_API_KEY,
+    gemini_api_key=GEMINI_API_KEY or None,
+    image_metadata_model=GEMINI_IMAGE_METADATA_MODEL,
+    image_metadata_timeout_sec=float(GEMINI_IMAGE_METADATA_TIMEOUT_SEC) if GEMINI_IMAGE_METADATA_TIMEOUT_SEC else None,
+    image_max_caption_chars=int(GEMINI_IMAGE_MAX_CAPTION_CHARS) if GEMINI_IMAGE_MAX_CAPTION_CHARS else None,
+) if FIRECRAWL_API_KEY else None
 
 user_pipelines: Dict[str, Dict[str, object]] = {}
 

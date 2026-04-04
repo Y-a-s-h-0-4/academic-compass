@@ -2,7 +2,6 @@ import { motion } from "framer-motion";
 import { 
   Home, 
   BookOpen, 
-  Brain, 
   BarChart3, 
   Settings, 
   Plus,
@@ -46,8 +45,6 @@ interface SidebarProps {
 const navItems = [
   { id: "home", icon: Home, label: "Home" },
   { id: "sources", icon: Database, label: "Sources" },
-  { id: "courses", icon: BookOpen, label: "Courses" },
-  { id: "mindmap", icon: Brain, label: "Mind Map" },
   { id: "analytics", icon: BarChart3, label: "Analytics" },
 ];
 
@@ -167,6 +164,9 @@ export const Sidebar = ({
                           if (e.key === "Enter") commitRename(chat.id);
                           if (e.key === "Escape") setRenamingChatId(null);
                         }}
+                        placeholder="Rename chat"
+                        title="Rename chat"
+                        aria-label="Rename chat"
                         className="flex-1 text-sm bg-muted border border-border rounded px-2 py-1.5 outline-none focus:ring-1 focus:ring-primary"
                       />
                     ) : (
@@ -257,6 +257,7 @@ export const Sidebar = ({
             </div>
           </div>
         )}
+
       </nav>
 
       {/* Settings */}

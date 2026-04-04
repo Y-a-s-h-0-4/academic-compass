@@ -196,6 +196,14 @@ class RAGGenerator:
             if asset_type == 'image':
                 source_info['image_width'] = result_metadata.get('image_width')
                 source_info['image_height'] = result_metadata.get('image_height')
+                if result_metadata.get('gemini_caption'):
+                    source_info['gemini_caption'] = result_metadata.get('gemini_caption')
+                if result_metadata.get('image_content_type'):
+                    source_info['image_content_type'] = result_metadata.get('image_content_type')
+                if result_metadata.get('image_concepts'):
+                    source_info['image_concepts'] = result_metadata.get('image_concepts')
+                if result_metadata.get('gemini_confidence') is not None:
+                    source_info['gemini_confidence'] = result_metadata.get('gemini_confidence')
 
             sources_info.append(source_info)
         
@@ -209,13 +217,15 @@ class RAGGenerator:
 STRICT GUIDELINES:
 1) Your default behavior is to answer using ONLY the provided context. Do not invent information.
 2) If the context contains relevant information, answer concisely and stay on-topic.
-3) If the context does NOT contain information to answer the question, reply: "I don't have information about this in the course materials."
-4) ONLY refuse when the question is clearly unrelated to coursework or asks for personal information; in that case reply: "This application is specifically designed for course assistance. Your question is outside the scope of this course assistant. Please check other resources for this information."
+3) Keep default answers short: maximum 4 bullet points or 120 words unless the user explicitly asks for a detailed explanation.
+4) Prefer direct answers first, then brief supporting points.
+5) If the context does NOT contain information to answer the question, reply: "I don't have information about this in the course materials."
+6) ONLY refuse when the question is clearly unrelated to coursework or asks for personal information; in that case reply: "This application is specifically designed for course assistance. Your question is outside the scope of this course assistant. Please check other resources for this information."
 
 CITATION REQUIREMENTS:
 1) For each factual claim from the materials, include the citation reference number in square brackets [1], [2], etc.
 2) Only use information from the provided context - do NOT add external knowledge or make assumptions.
-3) If you cannot find relevant information in the context, use the message in guideline #3 above.
+3) If you cannot find relevant information in the context, use the message in guideline #5 above.
 4) Be precise and accurate in your citations.
 5) When multiple sources support the same point, list all relevant citations like [1], [2], [3].
 
@@ -224,7 +234,7 @@ CONTEXT (with citation references):
 
 QUESTION: {query}
 
-Provide a focused answer using ONLY the course materials. If the context is insufficient, use the fallback message in guideline #3. If the question is clearly outside coursework, use the scope message in guideline #4."""
+Provide a focused, concise answer using ONLY the course materials. If the context is insufficient, use the fallback message in guideline #5. If the question is clearly outside coursework, use the scope message in guideline #6."""
 
         return prompt
     

@@ -61,7 +61,7 @@ class EmbeddingGenerator:
         logger.info(f"Generating embeddings for {len(chunks)} chunks")
         
         try:
-            texts = [chunk.content for chunk in chunks]
+            texts = [self._build_embedding_text(chunk) for chunk in chunks]
             
             embeddings = list(self.model.embed(texts))
             embedded_chunks = []
@@ -79,6 +79,33 @@ class EmbeddingGenerator:
         except Exception as e:
             logger.error(f"Error generating embeddings: {str(e)}")
             raise
+
+    def _build_embedding_text(self, chunk: DocumentChunk) -> str:
+        metadata = chunk.metadata or {}
+        if metadata.get("asset_type") != "image":
+            return chunk.content
+
+        parts = [chunk.content]
+
+        caption = str(metadata.get("gemini_caption") or "").strip()
+        if caption:
+            parts.append(f"Visual summary: {caption}")
+
+        content_type = str(metadata.get("image_content_type") or "").strip()
+        if content_type:
+            parts.append(f"Image type: {content_type}")
+
+        concepts_raw = metadata.get("image_concepts")
+        concepts_text = ""
+        if isinstance(concepts_raw, list):
+            concepts_text = ", ".join(str(item).strip() for item in concepts_raw if str(item).strip())
+        elif isinstance(concepts_raw, str):
+            concepts_text = ", ".join(item.strip() for item in concepts_raw.split("|") if item.strip())
+
+        if concepts_text:
+            parts.append(f"Visual concepts: {concepts_text}")
+
+        return "\n".join(part for part in parts if part)
     
     def generate_query_embedding(self, query_text: str) -> np.ndarray:
         try:

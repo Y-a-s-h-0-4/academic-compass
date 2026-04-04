@@ -31,6 +31,10 @@ FIRECRAWL_API_KEY=...
 ASSEMBLYAI_API_KEY=...
 SUPABASE_DB_URL=postgresql://user:pass@host:5432/postgres
 ZEP_API_KEY=...
+# Optional: image metadata enrichment for better visual relevance
+GEMINI_IMAGE_METADATA_MODEL=gemini-2.0-flash
+GEMINI_IMAGE_METADATA_TIMEOUT_SEC=8
+GEMINI_IMAGE_MAX_CAPTION_CHARS=500
 ```
 
 ## Install

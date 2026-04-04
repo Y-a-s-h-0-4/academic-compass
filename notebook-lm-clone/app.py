@@ -325,12 +325,20 @@ def initialize_pipeline():
     
     try:
         gemini_key = os.getenv("GEMINI_API_KEY")
+        gemini_image_metadata_model = os.getenv("GEMINI_IMAGE_METADATA_MODEL")
+        gemini_image_metadata_timeout_sec = os.getenv("GEMINI_IMAGE_METADATA_TIMEOUT_SEC")
+        gemini_image_max_caption_chars = os.getenv("GEMINI_IMAGE_MAX_CAPTION_CHARS")
         assemblyai_key = os.getenv("ASSEMBLYAI_API_KEY")
         firecrawl_key = os.getenv("FIRECRAWL_API_KEY")
         zep_key = os.getenv("ZEP_API_KEY")
         
         with st.spinner("Initializing NotebookLM pipeline..."):
-            doc_processor = DocumentProcessor()
+            doc_processor = DocumentProcessor(
+                gemini_api_key=gemini_key,
+                image_metadata_model=gemini_image_metadata_model,
+                image_metadata_timeout_sec=float(gemini_image_metadata_timeout_sec) if gemini_image_metadata_timeout_sec else None,
+                image_max_caption_chars=int(gemini_image_max_caption_chars) if gemini_image_max_caption_chars else None,
+            )
             embedding_generator = EmbeddingGenerator()
             vector_db = MilvusVectorDB(
                 db_path=f"./milvus_lite_{st.session_state.session_id[:8]}.db", 
@@ -345,7 +353,13 @@ def initialize_pipeline():
             
             audio_transcriber = AudioTranscriber(assemblyai_key) if assemblyai_key else None
             youtube_transcriber = YouTubeTranscriber(assemblyai_key) if assemblyai_key else None
-            web_scraper = WebScraper(firecrawl_key) if firecrawl_key else None
+            web_scraper = WebScraper(
+                firecrawl_key,
+                gemini_api_key=gemini_key,
+                image_metadata_model=gemini_image_metadata_model,
+                image_metadata_timeout_sec=float(gemini_image_metadata_timeout_sec) if gemini_image_metadata_timeout_sec else None,
+                image_max_caption_chars=int(gemini_image_max_caption_chars) if gemini_image_max_caption_chars else None,
+            ) if firecrawl_key else None
             podcast_script_generator = PodcastScriptGenerator(gemini_key) if gemini_key else None
             
             try:

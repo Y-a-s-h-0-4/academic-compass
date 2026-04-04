@@ -8,6 +8,7 @@ from datetime import datetime
 import re
 
 import pymupdf
+from src.embeddings.gemini_image_analyzer import GeminiImageMetadataAnalyzer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -60,6 +61,10 @@ class DocumentProcessor:
         chunk_overlap: int = 200,
         outputs_dir: str = "./outputs",
         asset_subdir: str = "assets",
+        gemini_api_key: Optional[str] = None,
+        image_metadata_model: Optional[str] = None,
+        image_metadata_timeout_sec: Optional[float] = None,
+        image_max_caption_chars: Optional[int] = None,
         min_image_edge: int = 64,
         min_image_bytes: int = 2048,
         min_rendered_image_area_ratio: float = 0.02,
@@ -80,6 +85,12 @@ class DocumentProcessor:
         self.max_images_per_page = max_images_per_page
         self.header_footer_band_ratio = header_footer_band_ratio
         self.max_repeated_small_image_occurrences = max_repeated_small_image_occurrences
+        self.image_metadata_analyzer = GeminiImageMetadataAnalyzer(
+            api_key=gemini_api_key,
+            model_name=image_metadata_model,
+            timeout_sec=image_metadata_timeout_sec,
+            max_caption_chars=image_max_caption_chars,
+        )
 
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
         self.assets_output_dir.mkdir(parents=True, exist_ok=True)
@@ -394,6 +405,19 @@ class DocumentProcessor:
                 ],
                 "image_area_ratio": round(float(candidate["display_area_ratio"]), 6),
             }
+
+            if self.image_metadata_analyzer.enabled:
+                analysis = self.image_metadata_analyzer.analyze_image(
+                    image_path=str(image_path),
+                    source_name=source_name,
+                    page_context=page_preview,
+                    hint_text="",
+                )
+                if analysis:
+                    metadata["gemini_caption"] = analysis.caption
+                    metadata["image_content_type"] = analysis.content_type
+                    metadata["image_concepts"] = "|".join(analysis.concepts)
+                    metadata["gemini_confidence"] = analysis.confidence
 
             image_chunks.append(
                 DocumentChunk(
