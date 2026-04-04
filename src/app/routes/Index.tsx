@@ -12,7 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { PanelRight, Plus, BookOpen, Send, Loader2, Play, Pause, SkipBack, SkipForward, Mic, MicOff, ArrowDown, Sun, Moon, FileUp, Globe, X, Paperclip, GraduationCap, HelpCircle, Layers, Network, FileText, ExternalLink, Trash2, Timer, RotateCcw } from "lucide-react";
+import { PanelRight, Plus, BookOpen, Send, Loader2, Play, Pause, SkipBack, SkipForward, Mic, MicOff, ArrowDown, Sun, Moon, FileUp, Globe, X, Paperclip, GraduationCap, HelpCircle, Layers, Network, FileText, ExternalLink, Trash2, FolderOpen, Timer, RotateCcw } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import UserProfile from "@/components/UserProfile";
 import { useUserContext } from "@/context/UserContext";
@@ -25,6 +25,12 @@ import {
   getConversationHistory,
   saveConversationMessage,
   generateLearningAid,
+  generateQuiz,
+  generateFlashcards,
+  generateSessionFeedbackReport,
+  saveSessionFeedbackReport,
+  SessionFeedbackReport,
+  SessionFeedbackImprovementItem,
   LearningAidType,
   submitLearningScore,
 } from "@/lib/notebookApi";
@@ -69,11 +75,8 @@ type MessageContentBlock =
   | { type: "text"; text: string }
   | { type: "table"; headers: string[]; rows: string[][] };
 
-// Mock data
 const initialChats: ChatItem[] = [
-  { id: "default", title: "Machine Learning Fundamentals", courseId: null },
-  { id: "chat-2", title: "Advanced Algorithms", courseId: null },
-  { id: "chat-3", title: "Data Structures", courseId: null },
+  { id: "default", title: "New Chat 1", courseId: null },
 ];
 
 const CHAT_STATE_STORAGE_PREFIX = "academic-compass:chat-state:v1";
@@ -102,6 +105,26 @@ const buildChatMessagesMap = (chatItems: ChatItem[]) =>
 
 const getChatStateStorageKey = (userId?: string | null) =>
   `${CHAT_STATE_STORAGE_PREFIX}:${userId || "anonymous"}`;
+
+const getSourceTypeLabel = (source: SourceItem): string => {
+  const rawType = (source.type || "").trim();
+  if (rawType) {
+    if (rawType.includes("/")) {
+      const subtype = rawType.split("/")[1] || rawType;
+      return subtype.toUpperCase();
+    }
+    return rawType.toUpperCase();
+  }
+
+  const fileName = (source.name || "").toLowerCase();
+  if (fileName.endsWith(".pdf")) return "PDF";
+  if (fileName.endsWith(".ppt") || fileName.endsWith(".pptx")) return "PPT";
+  if (fileName.endsWith(".doc") || fileName.endsWith(".docx")) return "DOC";
+  if (fileName.endsWith(".txt")) return "TXT";
+  if (fileName.endsWith(".csv")) return "CSV";
+  if (fileName.endsWith(".xlsx")) return "XLSX";
+  return "FILE";
+};
 
 const TABLE_SEPARATOR_REGEX = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/;
 
@@ -371,6 +394,46 @@ const mockQuizQuestion = {
   explanation: "Backpropagation is used to calculate the gradient of the loss function with respect to each weight, enabling the network to update weights in the direction that minimizes the loss.",
 };
 
+type QuizGenerationFormState = {
+  numberOfQuestions: number;
+  difficulty: "easy" | "medium" | "hard" | "mixed";
+  questionTypes: Array<"mcq" | "short" | "true_false" | "fill_blank">;
+  topic: string;
+};
+
+type FlashcardGenerationFormState = {
+  numberOfCards: number;
+  cardMode: "Question->Answer" | "Term->Definition" | "Concept->Explanation";
+  topic: string;
+};
+
+type QuizCompletionPayload = {
+  totalQuestions: number;
+  correctAnswers: number;
+  scorePercent: number;
+  feedback: string;
+  questionResults: Array<{
+    question_id?: string;
+    question: string;
+    question_type?: string;
+    concept_tested?: string;
+    difficulty?: string;
+    concept_tags?: string[];
+    score?: number;
+    max_score?: number;
+    correct_points?: string[];
+    incorrect_points?: string[];
+    missing_points?: string[];
+    reference_answer: string;
+    student_answer: string;
+    evaluation: Record<string, any>;
+    what_you_got_right: string[];
+    what_was_incorrect: Array<{ student_claim: string; correction: string }>;
+    what_you_missed: string[];
+    question_tip: string;
+  }>;
+};
+
 const Index = () => {
   const { userId } = useUserContext();
   const [activePage, setActivePage] = useState("home");
@@ -390,6 +453,7 @@ const Index = () => {
   const [sourcesPageLoading, setSourcesPageLoading] = useState(false);
   const [sourcesPageError, setSourcesPageError] = useState<string | null>(null);
   const [deletingSourceId, setDeletingSourceId] = useState<string | null>(null);
+  const [sourcesStatusLoading, setSourcesStatusLoading] = useState(false);
   const [ingestLoading, setIngestLoading] = useState(false);
   const [ingestMessage, setIngestMessage] = useState<string | null>(null);
   const [webUrl, setWebUrl] = useState("");
@@ -398,10 +462,28 @@ const Index = () => {
   const [queryText, setQueryText] = useState("");
   const [answer, setAnswer] = useState<string | null>(null);
   const [showAttachPopover, setShowAttachPopover] = useState(false);
+  const [showSourcesPopover, setShowSourcesPopover] = useState(false);
   const [showAidPopover, setShowAidPopover] = useState(false);
   const [learningAids, setLearningAids] = useState<Partial<Record<LearningAidType, any>>>({});
   const [aidLoading, setAidLoading] = useState<LearningAidType | null>(null);
   const [activeAidTab, setActiveAidTab] = useState<LearningAidType | null>(null);
+  const [quizConfig, setQuizConfig] = useState<QuizGenerationFormState>({
+    numberOfQuestions: 5,
+    difficulty: "mixed",
+    questionTypes: ["mcq"],
+    topic: "",
+  });
+  const [flashcardConfig, setFlashcardConfig] = useState<FlashcardGenerationFormState>({
+    numberOfCards: 10,
+    cardMode: "Question->Answer",
+    topic: "",
+  });
+  const [sessionReport, setSessionReport] = useState<SessionFeedbackReport | null>(null);
+  const [sessionReportLoading, setSessionReportLoading] = useState(false);
+  const [sessionReportError, setSessionReportError] = useState<string | null>(null);
+  const [sessionReportSaved, setSessionReportSaved] = useState(false);
+  const [lastQuizCompletion, setLastQuizCompletion] = useState<QuizCompletionPayload | null>(null);
+  const [lastQuizCourseMeta, setLastQuizCourseMeta] = useState<{ courseId: string; courseName: string; topic: string } | null>(null);
   const [inlineWebUrl, setInlineWebUrl] = useState("");
   const [showUrlInput, setShowUrlInput] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -683,24 +765,16 @@ const Index = () => {
 
   // Hydrate chat metadata from local storage so user-created chats survive refresh/reopen.
   useEffect(() => {
+    // Prevent write-back during user switch until this hydration completes.
+    chatStateHydratedRef.current = false;
+
     const storageKey = getChatStateStorageKey(userId);
-    const anonymousStorageKey = getChatStateStorageKey(null);
     const fallbackChats = [...initialChats];
     const fallbackCourses: CourseItem[] = [];
     const fallbackActiveChatId = fallbackChats[0]?.id ?? "";
 
     try {
-      let raw = localStorage.getItem(storageKey);
-
-      // If user just signed in and has no user-scoped chat state yet,
-      // inherit anonymous state once so chats do not appear to vanish.
-      if (!raw && userId) {
-        const anonymousRaw = localStorage.getItem(anonymousStorageKey);
-        if (anonymousRaw) {
-          raw = anonymousRaw;
-          localStorage.setItem(storageKey, anonymousRaw);
-        }
-      }
+      const raw = localStorage.getItem(storageKey);
 
       const parsed = raw ? sanitizeChatState(JSON.parse(raw)) : null;
 
@@ -1218,13 +1292,38 @@ const Index = () => {
     }
   };
 
-  const refreshSources = async () => {
+  const refreshSources = async (): Promise<number> => {
+    if (!userId || !activeChatId) {
+      setSources([]);
+      return 0;
+    }
+
     try {
-      if (!userId || !activeChatId) return;
       const res = await listSources(userId, activeChatId);
-      setSources(res.sources || []);
+      const nextSources = Array.isArray(res.sources) ? res.sources : [];
+      setSources(nextSources);
+      return nextSources.length;
     } catch (err) {
       console.error(err);
+      throw err;
+    }
+  };
+
+  const handleSourcesStatusClick = async () => {
+    if (!userId || !activeChatId) {
+      setIngestMessage("Please sign in and select a chat to view uploaded sources.");
+      return;
+    }
+
+    setSourcesStatusLoading(true);
+    setSourcesPageError(null);
+
+    try {
+      await Promise.all([refreshSources(), loadSourcesByCourse()]);
+    } catch (err: any) {
+      setIngestMessage(err?.message || "Failed to refresh sources.");
+    } finally {
+      setSourcesStatusLoading(false);
     }
   };
 
@@ -1379,6 +1478,97 @@ const Index = () => {
     handleQuerySubmitWithText(queryText);
   };
 
+  const handleQuizConfigChange = (patch: Partial<QuizGenerationFormState>) => {
+    setQuizConfig((prev) => ({ ...prev, ...patch }));
+  };
+
+  const handleFlashcardConfigChange = (patch: Partial<FlashcardGenerationFormState>) => {
+    setFlashcardConfig((prev) => ({ ...prev, ...patch }));
+  };
+
+  const normalizeQuizQuestions = (rawItems: any): any[] => {
+    if (!Array.isArray(rawItems)) return [];
+
+    return rawItems
+      .map((item: any, idx: number) => {
+        if (!item || typeof item !== "object" || typeof item.question !== "string") {
+          return null;
+        }
+
+        if (Array.isArray(item.options)) {
+          const normalizedOptions = item.options
+            .map((opt: any, optIdx: number) => ({
+              id: String(opt?.id || String.fromCharCode(97 + optIdx)).toLowerCase(),
+              text: String(opt?.text || "").trim(),
+              isCorrect: Boolean(opt?.isCorrect),
+            }))
+            .filter((opt: any) => opt.text.length > 0);
+
+          if (normalizedOptions.length < 2) return null;
+
+          return {
+            question: item.question,
+            options: normalizedOptions,
+            explanation: item.explanation,
+            question_id: String(item.question_id || item.id || `q${idx + 1}`),
+            question_type: String(item.type || item.question_type || "mcq").toLowerCase(),
+            concept_tested: String(item.concept_tested || "").trim(),
+            difficulty: String(item.difficulty || quizConfig.difficulty || "mixed").toLowerCase(),
+            concept_tags: Array.isArray(item.concept_tags)
+              ? item.concept_tags.map((tag: any) => String(tag).trim()).filter(Boolean)
+              : (String(item.concept_tested || "").trim() ? [String(item.concept_tested).trim()] : []),
+          };
+        }
+
+        const optionMap = item.options && typeof item.options === "object" ? item.options : null;
+        const correct = String(item.correct_answer || "").trim().toUpperCase();
+        if (!optionMap || !correct) return null;
+
+        const optionKeys = ["A", "B", "C", "D"].filter((key) => typeof optionMap[key] === "string");
+        if (optionKeys.length < 2) return null;
+
+        const normalizedOptions = optionKeys.map((key) => ({
+          id: key.toLowerCase(),
+          text: String(optionMap[key]).trim(),
+          isCorrect: key === correct,
+        }));
+
+        if (!normalizedOptions.some((opt) => opt.isCorrect)) return null;
+
+        return {
+          question: item.question,
+          options: normalizedOptions,
+          explanation: String(item.explanation || "").trim(),
+          question_id: String(item.question_id || item.id || `q${idx + 1}`),
+          question_type: String(item.type || item.question_type || "mcq").toLowerCase(),
+          concept_tested: String(item.concept_tested || "").trim(),
+          difficulty: String(item.difficulty || quizConfig.difficulty || "mixed").toLowerCase(),
+          concept_tags: Array.isArray(item.concept_tags)
+            ? item.concept_tags.map((tag: any) => String(tag).trim()).filter(Boolean)
+            : (String(item.concept_tested || "").trim() ? [String(item.concept_tested).trim()] : []),
+        };
+      })
+      .filter(Boolean);
+  };
+
+  const parseAidResponseContent = (content: string, type: LearningAidType): any => {
+    let raw = (content || "").trim();
+    raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = raw;
+    }
+
+    if (type === "quiz") {
+      parsed = normalizeQuizQuestions(parsed);
+    }
+
+    return parsed;
+  };
+
   const handleGenerateAid = async (type: LearningAidType, force = false) => {
     if (!userId || !activeChatId || sources.length === 0) return;
     // If already generated (and not an error), just show the tab
@@ -1390,18 +1580,55 @@ const Index = () => {
     setAidLoading(type);
     setActiveAidTab(type);
     setIsRightPanelOpen(true);
-    try {
-      const result = await generateLearningAid(userId, activeChatId, type);
-      // Strip markdown code fences if present
-      let raw = (result.content || "").trim();
-      raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
 
-      let parsed: any;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        parsed = raw;
-      }
+    if (type === "quiz") {
+      setSessionReport(null);
+      setSessionReportError(null);
+      setSessionReportSaved(false);
+      setLastQuizCompletion(null);
+      setLastQuizCourseMeta(null);
+    }
+
+    try {
+      const existingQuizQuestions = Array.isArray(learningAids.quiz)
+        ? learningAids.quiz
+            .map((item: any) => (typeof item?.question === "string" ? item.question.trim() : ""))
+            .filter((question: string) => question.length > 0)
+        : [];
+
+      const existingFlashcards = Array.isArray(learningAids.flashcards)
+        ? learningAids.flashcards
+            .map((item: any) => {
+              if (typeof item?.front === "string" && typeof item?.back === "string") {
+                return `${item.front} | ${item.back}`;
+              }
+              return "";
+            })
+            .filter((card: string) => card.length > 0)
+        : [];
+
+      const result = type === "quiz"
+        ? await generateQuiz({
+            userId,
+            chatId: activeChatId,
+            numberOfQuestions: quizConfig.numberOfQuestions,
+            difficulty: quizConfig.difficulty,
+            questionTypes: quizConfig.questionTypes,
+            topic: quizConfig.topic || undefined,
+            previousQuestions: force ? existingQuizQuestions : [],
+          })
+        : type === "flashcards"
+        ? await generateFlashcards({
+            userId,
+            chatId: activeChatId,
+            numberOfCards: flashcardConfig.numberOfCards,
+            cardMode: flashcardConfig.cardMode,
+            topic: flashcardConfig.topic || undefined,
+            previousCards: force ? existingFlashcards : [],
+          })
+        : await generateLearningAid(userId, activeChatId, type);
+      // Strip markdown code fences if present
+      const parsed = parseAidResponseContent(result.content, type);
 
       // Validate the parsed data matches what the component expects
       const isValid =
@@ -1431,12 +1658,237 @@ const Index = () => {
     }
   };
 
-  const handleQuizComplete = async (result: {
-    totalQuestions: number;
-    correctAnswers: number;
-    scorePercent: number;
-    feedback: string;
-  }) => {
+  const handleAddMoreQuizQuestions = async () => {
+    if (!userId || !activeChatId || sources.length === 0) return;
+
+    const currentQuiz = Array.isArray(learningAids.quiz) ? learningAids.quiz : [];
+    const existingQuestions = currentQuiz
+      .map((item: any) => (typeof item?.question === "string" ? item.question.trim() : ""))
+      .filter((question: string) => question.length > 0);
+
+    setAidLoading("quiz");
+    setActiveAidTab("quiz");
+    setIsRightPanelOpen(true);
+
+    try {
+      const result = await generateQuiz({
+        userId,
+        chatId: activeChatId,
+        numberOfQuestions: Math.min(3, quizConfig.numberOfQuestions),
+        difficulty: quizConfig.difficulty,
+        questionTypes: quizConfig.questionTypes,
+        topic: quizConfig.topic || undefined,
+        previousQuestions: existingQuestions,
+      });
+
+      const parsed = parseAidResponseContent(result.content, "quiz");
+
+      const merged = [...currentQuiz];
+      const seen = new Set(existingQuestions.map((question) => question.toLowerCase()));
+
+      for (const item of parsed) {
+        const question = typeof item?.question === "string" ? item.question.trim() : "";
+        if (!question || seen.has(question.toLowerCase())) continue;
+        seen.add(question.toLowerCase());
+        merged.push(item);
+      }
+
+      setLearningAids((prev) => ({ ...prev, quiz: merged }));
+      setActiveAidTab("quiz");
+    } catch (err: any) {
+      console.error("Failed to add more quiz questions:", err);
+      setLearningAids((prev) => ({ ...prev, quiz: { error: err?.message || "Failed to add more questions" } }));
+    } finally {
+      setAidLoading(null);
+    }
+  };
+
+  const handleAddMoreFlashcards = async () => {
+    if (!userId || !activeChatId || sources.length === 0) return;
+
+    const currentFlashcards = Array.isArray(learningAids.flashcards) ? learningAids.flashcards : [];
+    const existingCards = currentFlashcards
+      .map((item: any) => {
+        if (typeof item?.front === "string" && typeof item?.back === "string") {
+          return `${item.front} | ${item.back}`;
+        }
+        return "";
+      })
+      .filter((card: string) => card.length > 0);
+
+    setAidLoading("flashcards");
+    setActiveAidTab("flashcards");
+    setIsRightPanelOpen(true);
+
+    try {
+      const result = await generateFlashcards({
+        userId,
+        chatId: activeChatId,
+        numberOfCards: Math.min(5, flashcardConfig.numberOfCards),
+        cardMode: flashcardConfig.cardMode,
+        topic: flashcardConfig.topic || undefined,
+        previousCards: existingCards,
+      });
+
+      const parsed = parseAidResponseContent(result.content, "flashcards");
+
+      const merged = [...currentFlashcards];
+      const seen = new Set(
+        existingCards.map((card) => card.toLowerCase())
+      );
+
+      for (const item of parsed) {
+        const front = typeof item?.front === "string" ? item.front.trim() : "";
+        const back = typeof item?.back === "string" ? item.back.trim() : "";
+        if (!front || !back) continue;
+        const cardKey = `${front} | ${back}`.toLowerCase();
+        if (seen.has(cardKey)) continue;
+        seen.add(cardKey);
+        merged.push(item);
+      }
+
+      setLearningAids((prev) => ({ ...prev, flashcards: merged }));
+      setActiveAidTab("flashcards");
+    } catch (err: any) {
+      console.error("Failed to add more flashcards:", err);
+      setLearningAids((prev) => ({ ...prev, flashcards: { error: err?.message || "Failed to add more cards" } }));
+    } finally {
+      setAidLoading(null);
+    }
+  };
+
+  const handleResetQuizToSettings = () => {
+    setLearningAids((prev) => {
+      const next = { ...prev };
+      delete next.quiz;
+      return next;
+    });
+    setAidLoading(null);
+    setActiveAidTab("quiz");
+    setIsRightPanelOpen(true);
+    setSessionReport(null);
+    setSessionReportError(null);
+    setSessionReportSaved(false);
+    setLastQuizCompletion(null);
+    setLastQuizCourseMeta(null);
+  };
+
+  const runSessionFeedbackGeneration = async (
+    completion: QuizCompletionPayload,
+    meta: { courseId: string; courseName: string; topic: string },
+  ) => {
+    if (!userId || !activeChatId) return;
+
+    const rawQuizItems = Array.isArray(learningAids.quiz) ? learningAids.quiz : [];
+    const retrievedContextChunks = rawQuizItems
+      .map((item: any) => {
+        const q = typeof item?.question === "string" ? item.question.trim() : "";
+        const e = typeof item?.explanation === "string" ? item.explanation.trim() : "";
+        return [q, e].filter(Boolean).join(" - ");
+      })
+      .filter((value: string) => value.length > 0)
+      .slice(0, 20);
+
+    setSessionReportLoading(true);
+    setSessionReportError(null);
+    setSessionReportSaved(false);
+
+    try {
+      const sessionPayload = {
+        userId,
+        chatId: activeChatId,
+        courseId: meta.courseId,
+        courseName: meta.courseName,
+        topic: meta.topic,
+        retrievedContextChunks,
+        sessionQuestions: completion.questionResults,
+      };
+      console.log("Evaluation Payload:", sessionPayload);
+
+      const generated = await generateSessionFeedbackReport({
+        userId: sessionPayload.userId,
+        chatId: sessionPayload.chatId,
+        courseId: sessionPayload.courseId,
+        courseName: sessionPayload.courseName,
+        topic: sessionPayload.topic,
+        retrievedContextChunks: sessionPayload.retrievedContextChunks,
+        sessionQuestions: sessionPayload.sessionQuestions,
+      });
+
+      setSessionReport(generated.report);
+    } catch (err: any) {
+      console.error("Failed to generate session feedback report:", err);
+      setSessionReportError(err?.message || "Failed to generate session report");
+      setSessionReport(null);
+    } finally {
+      setSessionReportLoading(false);
+    }
+  };
+
+  const handleRetrySessionReport = async () => {
+    if (!lastQuizCompletion || !lastQuizCourseMeta) return;
+    await runSessionFeedbackGeneration(lastQuizCompletion, lastQuizCourseMeta);
+  };
+
+  const handleSaveSessionReport = async () => {
+    if (!userId || !activeChatId || !sessionReport || !lastQuizCourseMeta || !lastQuizCompletion) return;
+    try {
+      await saveSessionFeedbackReport({
+        userId,
+        chatId: activeChatId,
+        courseId: lastQuizCourseMeta.courseId,
+        courseName: lastQuizCourseMeta.courseName,
+        topic: lastQuizCourseMeta.topic,
+        report: sessionReport,
+        sessionScore: lastQuizCompletion.scorePercent,
+      });
+      setSessionReportSaved(true);
+    } catch (err: any) {
+      console.error("Failed to save session feedback report:", err);
+      setSessionReportError(err?.message || "Failed to save session report");
+    }
+  };
+
+  const handleRunImprovementAction = async (item: SessionFeedbackImprovementItem) => {
+    const action = item.system_action;
+    if (!action) return;
+
+    const actionType = String(action.action_type || "").toLowerCase();
+    const settings = action.settings || {};
+    const topic = String(settings.topic || item.concept || quizConfig.topic || "").trim();
+    const difficulty = String(settings.difficulty || item.difficulty_level || "mixed").toLowerCase();
+
+    if (actionType === "quiz") {
+      setQuizConfig((prev) => ({
+        ...prev,
+        topic: topic || prev.topic,
+        difficulty: (["easy", "medium", "hard", "mixed"].includes(difficulty) ? difficulty : prev.difficulty) as QuizGenerationFormState["difficulty"],
+      }));
+      await handleGenerateAid("quiz", true);
+      return;
+    }
+
+    if (actionType === "flashcards") {
+      setFlashcardConfig((prev) => ({
+        ...prev,
+        topic: topic || prev.topic,
+      }));
+      await handleGenerateAid("flashcards", true);
+      return;
+    }
+
+    if (actionType === "mindmap") {
+      await handleGenerateAid("mindmap", true);
+      return;
+    }
+
+    if (actionType === "summary") {
+      await handleGenerateAid("summary", true);
+      return;
+    }
+  };
+
+  const handleQuizComplete = async (result: QuizCompletionPayload) => {
     if (!userId || !activeChatId) return;
 
     const activeChat = chats.find((chat) => chat.id === activeChatId);
@@ -1446,6 +1898,12 @@ const Index = () => {
 
     const courseId = activeCourse?.id || activeChatId;
     const courseName = activeCourse?.title || activeChat?.title || "Uncategorized";
+    const topic = quizConfig.topic.trim() || courseName;
+
+    setLastQuizCompletion(result);
+    setLastQuizCourseMeta({ courseId, courseName, topic });
+
+    await runSessionFeedbackGeneration(result, { courseId, courseName, topic });
 
     try {
       await submitLearningScore({
@@ -2003,6 +2461,65 @@ const Index = () => {
                     className="min-h-[52px] max-h-[200px] resize-none"
                     rows={1}
                   />
+
+                  <Popover
+                    open={showSourcesPopover}
+                    onOpenChange={(open) => {
+                      setShowSourcesPopover(open);
+                      if (open) {
+                        handleSourcesStatusClick();
+                      }
+                    }}
+                  >
+                    <PopoverTrigger asChild>
+                      <Button
+                        variant="outline"
+                        size="icon"
+                        className="relative h-[52px] w-[52px] flex-shrink-0"
+                        disabled={!userId || !activeChatId || ingestLoading || sourcesStatusLoading || sourcesPageLoading}
+                        title="View uploaded resources"
+                      >
+                        {sourcesStatusLoading || sourcesPageLoading ? (
+                          <Loader2 className="w-5 h-5 animate-spin" />
+                        ) : (
+                          <FolderOpen className="w-5 h-5" />
+                        )}
+                        {sources.length > 0 && (
+                          <span className="absolute -right-1.5 -top-1.5 min-w-[18px] rounded-full bg-amber-500 px-1 text-[10px] font-semibold leading-[18px] text-white">
+                            {sources.length}
+                          </span>
+                        )}
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent side="top" align="end" className="w-80 p-3">
+                      <div className="space-y-2">
+                        <div>
+                          <p className="text-base font-medium text-foreground">Sources in this chat</p>
+                          <p className="text-sm text-muted-foreground">
+                            {sources.length} source{sources.length === 1 ? "" : "s"} available
+                          </p>
+                        </div>
+
+                        {sources.length > 0 ? (
+                          <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+                            {sources.map((source) => (
+                              <div key={source.id} className="rounded-lg border border-border p-2.5">
+                                <p className="truncate text-sm font-medium text-foreground">{source.name}</p>
+                                <p className="mt-0.5 text-xs text-muted-foreground">
+                                  {getSourceTypeLabel(source)} • {source.chunks} chunk{source.chunks === 1 ? "" : "s"}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="rounded-lg border border-dashed border-border p-3 text-sm text-muted-foreground">
+                            No uploaded resources yet.
+                          </div>
+                        )}
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+
                   <Button
                     onClick={() => {
                       if (isListening) {
@@ -2288,13 +2805,35 @@ const Index = () => {
         learningAids={learningAids}
         aidLoading={aidLoading}
         activeAidTab={activeAidTab}
+        quizConfig={quizConfig}
+        onQuizConfigChange={handleQuizConfigChange}
+        flashcardConfig={flashcardConfig}
+        onFlashcardConfigChange={handleFlashcardConfigChange}
         onTabChange={(tab) => {
           setActiveAidTab(tab);
-          if ((!learningAids[tab] || learningAids[tab]?.error) && userId && sources.length > 0) {
+          if ((!learningAids[tab] || learningAids[tab]?.error) && userId && sources.length > 0 && tab !== "quiz" && tab !== "flashcards") {
             handleGenerateAid(tab, true);
           }
         }}
-        onRegenerate={(tab) => handleGenerateAid(tab, true)}
+        onAddMoreQuestions={handleAddMoreQuizQuestions}
+        onResetQuizToSettings={handleResetQuizToSettings}
+        onAddMoreFlashcards={handleAddMoreFlashcards}
+        sessionReport={sessionReport}
+        sessionReportLoading={sessionReportLoading}
+        sessionReportError={sessionReportError}
+        sessionReportSaved={sessionReportSaved}
+        onRetrySessionReport={handleRetrySessionReport}
+        onSaveSessionReport={handleSaveSessionReport}
+        onRunImprovementAction={handleRunImprovementAction}
+        onRegenerate={(tab) => {
+          if (tab === "quiz") {
+            handleGenerateAid("quiz", true);
+          } else if (tab === "flashcards") {
+            handleGenerateAid("flashcards", true);
+          } else {
+            handleGenerateAid(tab, true);
+          }
+        }}
         onQuizComplete={handleQuizComplete}
       />
     </div>

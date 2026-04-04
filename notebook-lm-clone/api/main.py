@@ -68,6 +68,7 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 sources_registry: Dict[str, Dict[str, List[dict]]] = {}
 learning_scores_registry: Dict[str, Dict[str, dict]] = {}
 learning_attempts_registry: Dict[str, List[dict]] = {}
+session_feedback_reports_registry: Dict[str, List[dict]] = {}
 
 
 def sanitize_collection_name(value: str) -> str:
@@ -98,6 +99,10 @@ def get_memory_learning_scores_bucket(user_id: str) -> Dict[str, dict]:
 
 def get_memory_learning_attempts_bucket(user_id: str) -> List[dict]:
     return learning_attempts_registry.setdefault(user_id, [])
+
+
+def get_memory_session_feedback_reports_bucket(user_id: str) -> List[dict]:
+    return session_feedback_reports_registry.setdefault(user_id, [])
 
 
 def get_db_connection():
@@ -222,6 +227,28 @@ def ensure_sources_table():
                     """
                     CREATE INDEX IF NOT EXISTS idx_learning_attempts_user_time
                     ON learning_quiz_attempts(user_id, created_at DESC);
+                    """
+                )
+
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS learning_session_feedback_reports (
+                        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                        user_id TEXT NOT NULL,
+                        chat_id TEXT NOT NULL DEFAULT 'default',
+                        course_id TEXT,
+                        course_name TEXT,
+                        topic TEXT,
+                        session_score DOUBLE PRECISION,
+                        report JSONB NOT NULL,
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    );
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_session_feedback_reports_user_time
+                    ON learning_session_feedback_reports(user_id, created_at DESC);
                     """
                 )
         conn.close()
@@ -458,6 +485,532 @@ def fetch_learning_score_summary(user_id: str) -> Dict[str, Any]:
         conn.close()
 
 
+def _safe_parse_json(raw: str) -> Dict[str, Any]:
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            return {}
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return {}
+
+
+def _safe_float(value: Any, fallback: float = 0.0) -> float:
+    if value is None or value == "":
+        return fallback
+    if isinstance(value, (dict, list, tuple, set)):
+        return fallback
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _safe_int(value: Any, fallback: int = 0) -> int:
+    if value is None or value == "":
+        return fallback
+    if isinstance(value, (dict, list, tuple, set)):
+        return fallback
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _safe_text(value: Any, fallback: str = "") -> str:
+    if isinstance(value, (dict, list, tuple, set)):
+        return fallback
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def _extract_concept_tags(item: Dict[str, Any], topic_fallback: str) -> List[str]:
+    tags: List[str] = []
+    raw_tags = item.get("concept_tags")
+    if isinstance(raw_tags, list):
+        tags = [str(tag).strip() for tag in raw_tags if str(tag).strip()]
+
+    if not tags:
+        concept_tested = _safe_text(item.get("concept_tested"), "")
+        if concept_tested:
+            tags = [concept_tested]
+
+    if not tags:
+        question_type = _safe_text(item.get("question_type"), "")
+        if question_type:
+            tags = [question_type]
+
+    if not tags:
+        tags = [topic_fallback]
+
+    # Keep unique order
+    seen: set = set()
+    unique_tags: List[str] = []
+    for tag in tags:
+        key = tag.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_tags.append(tag)
+    return unique_tags
+
+
+def _coerce_question_item(raw_item: Dict[str, Any], index: int, topic_fallback: str) -> Dict[str, Any]:
+    evaluation = raw_item.get("evaluation") if isinstance(raw_item.get("evaluation"), dict) else {}
+
+    score = _safe_float(raw_item.get("score"), _safe_float(evaluation.get("score"), 0.0))
+    max_score = _safe_float(raw_item.get("max_score"), _safe_float(evaluation.get("max_score"), 1.0))
+    if max_score <= 0:
+        max_score = 1.0
+    score = max(0.0, min(score, max_score))
+
+    correct_points = raw_item.get("correct_points") if isinstance(raw_item.get("correct_points"), list) else evaluation.get("correct_points")
+    incorrect_points = raw_item.get("incorrect_points") if isinstance(raw_item.get("incorrect_points"), list) else evaluation.get("incorrect_points")
+    missing_points = raw_item.get("missing_points") if isinstance(raw_item.get("missing_points"), list) else evaluation.get("missing_points")
+
+    correct_points = [str(point).strip() for point in (correct_points or []) if str(point).strip()]
+    incorrect_points = [str(point).strip() for point in (incorrect_points or []) if str(point).strip()]
+    missing_points = [str(point).strip() for point in (missing_points or []) if str(point).strip()]
+
+    if score == max_score:
+        verdict = "fully_correct"
+    elif score > 0:
+        verdict = "partially_correct"
+    else:
+        verdict = "incorrect"
+
+    return {
+        "question_id": _safe_text(raw_item.get("question_id"), f"q{index + 1}"),
+        "question": _safe_text(raw_item.get("question"), f"Question {index + 1}"),
+        "question_type": _safe_text(raw_item.get("question_type"), "mcq"),
+        "concept_tested": _safe_text(raw_item.get("concept_tested"), ""),
+        "difficulty": _safe_text(raw_item.get("difficulty"), "mixed"),
+        "student_answer": _safe_text(raw_item.get("student_answer"), ""),
+        "reference_answer": _safe_text(raw_item.get("reference_answer"), ""),
+        "score": score,
+        "max_score": max_score,
+        "correct_points": correct_points,
+        "incorrect_points": incorrect_points,
+        "missing_points": missing_points,
+        "concept_tags": _extract_concept_tags(raw_item, topic_fallback),
+        "evaluation": evaluation,
+    }
+
+
+def _aggregate_session_metrics(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    fully_correct_count = sum(1 for item in items if float(item.get("score") or 0) == float(item.get("max_score") or 0))
+    partially_correct_count = sum(1 for item in items if 0 < float(item.get("score") or 0) < float(item.get("max_score") or 0))
+    incorrect_count = sum(1 for item in items if float(item.get("score") or 0) == 0)
+
+    total_score = round(sum(float(item.get("score") or 0) for item in items), 2)
+    total_max_score = round(sum(float(item.get("max_score") or 0) for item in items), 2)
+    overall_percentage = round((total_score / total_max_score) * 100, 2) if total_max_score > 0 else 0.0
+
+    if overall_percentage >= 90:
+        tier = "Excellent - Strong mastery demonstrated"
+    elif overall_percentage >= 75:
+        tier = "Good - Solid understanding with minor gaps"
+    elif overall_percentage >= 50:
+        tier = "Developing - Key concepts need reinforcement"
+    else:
+        tier = "Needs Attention - Foundational review recommended"
+
+    return {
+        "fully_correct_count": fully_correct_count,
+        "partially_correct_count": partially_correct_count,
+        "incorrect_count": incorrect_count,
+        "total_score": total_score,
+        "total_max_score": total_max_score,
+        "overall_percentage": overall_percentage,
+        "tier": tier,
+    }
+
+
+def _build_question_results_from_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    payload: List[Dict[str, Any]] = []
+    for idx, item in enumerate(items):
+        payload.append(
+            {
+                "question_index": idx + 1,
+                "question": item.get("question", f"Question {idx + 1}"),
+                "what_you_got_right": item.get("correct_points", []),
+                "what_was_incorrect": [
+                    {
+                        "student_claim": point,
+                        "correction": "Re-check this claim against the reference answer and concept rule.",
+                    }
+                    for point in item.get("incorrect_points", [])
+                ],
+                "what_you_missed": item.get("missing_points", []),
+                "question_tip": _safe_text(
+                    item.get("evaluation", {}).get("study_tip") if isinstance(item.get("evaluation"), dict) else "",
+                    "Review this concept using one worked example and then retry a similar question.",
+                ),
+            }
+        )
+    return payload
+
+
+def _build_concept_rollup(items: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    rollup: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        for tag in item.get("concept_tags", []):
+            node = rollup.setdefault(
+                tag,
+                {
+                    "concept": tag,
+                    "score": 0.0,
+                    "max_score": 0.0,
+                    "correct_points": [],
+                    "incorrect_points": [],
+                    "missing_points": [],
+                    "question_refs": [],
+                },
+            )
+            node["score"] += float(item.get("score") or 0)
+            node["max_score"] += float(item.get("max_score") or 0)
+            node["correct_points"].extend(item.get("correct_points", []))
+            node["incorrect_points"].extend(item.get("incorrect_points", []))
+            node["missing_points"].extend(item.get("missing_points", []))
+            node["question_refs"].append(item.get("question_id", "q?"))
+    return rollup
+
+
+def _fallback_strength_areas(concept_rollup: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    strengths: List[Dict[str, Any]] = []
+    for concept, node in concept_rollup.items():
+        max_score = float(node.get("max_score") or 0)
+        if max_score <= 0:
+            continue
+        pct = (float(node.get("score") or 0) / max_score) * 100
+        if pct >= 75:
+            strengths.append(
+                {
+                    "concept": concept,
+                    "evidence": f"Strong performance in {', '.join(node.get('question_refs', []))}",
+                    "acknowledgement": "You demonstrated clear understanding of this concept.",
+                }
+            )
+
+    if strengths:
+        return strengths
+
+    # Emerging strengths fallback from partial understanding.
+    candidates = []
+    for concept, node in concept_rollup.items():
+        max_score = float(node.get("max_score") or 0)
+        if max_score <= 0:
+            continue
+        pct = (float(node.get("score") or 0) / max_score) * 100
+        if pct > 0 or node.get("correct_points"):
+            candidates.append((pct, concept, node))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    for _, concept, node in candidates[:2]:
+        strengths.append(
+            {
+                "concept": concept,
+                "evidence": f"Emerging performance in {', '.join(node.get('question_refs', []))}",
+                "acknowledgement": "You are showing partial understanding that can become a strong area with focused practice.",
+            }
+        )
+    if not strengths:
+        strengths.append(
+            {
+                "concept": "Emerging Strengths",
+                "evidence": "No concept reached consistent mastery in this session.",
+                "acknowledgement": "That is okay - your responses still reveal a starting base to build on through targeted practice.",
+            }
+        )
+    return strengths
+
+
+def _fallback_weak_areas(concept_rollup: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    weak: List[Dict[str, Any]] = []
+    for concept, node in concept_rollup.items():
+        max_score = float(node.get("max_score") or 0)
+        if max_score <= 0:
+            continue
+        pct = (float(node.get("score") or 0) / max_score) * 100
+        incorrect_points = node.get("incorrect_points", [])
+        missing_points = node.get("missing_points", [])
+        if pct < 60 or incorrect_points or missing_points:
+            severity = "Critical Gap" if pct < 40 else "Moderate Gap" if pct < 60 else "Minor Gap"
+            weak.append(
+                {
+                    "concept": concept,
+                    "description": "; ".join((incorrect_points + missing_points)[:2]) or "This concept needs targeted reinforcement.",
+                    "exposed_by": ", ".join(node.get("question_refs", [])),
+                    "significance": "This concept influences performance across related questions.",
+                    "severity": severity,
+                }
+            )
+
+    if weak:
+        return weak
+
+    # No obvious weak areas from scores: infer from recurring missing/incorrect phrases.
+    return [
+        {
+            "concept": "Concept Reinforcement",
+            "description": "Review nuanced differences between related concepts to avoid future confusion.",
+            "exposed_by": "Session-wide pattern",
+            "significance": "Improves reliability under exam-like pressure.",
+            "severity": "Minor Gap",
+        }
+    ]
+
+
+def _fallback_improvement_plan(weak_areas: List[Dict[str, Any]], topic_fallback: str) -> List[Dict[str, Any]]:
+    plan: List[Dict[str, Any]] = []
+    for area in weak_areas[:5]:
+        concept = _safe_text(area.get("concept"), topic_fallback)
+        severity = _safe_text(area.get("severity"), "Moderate Gap")
+        difficulty = "hard" if severity == "Critical Gap" else "medium"
+        plan.append(
+            {
+                "concept": concept,
+                "study_suggestion": f"Re-study the core rules and edge cases for {concept}, then apply them in a worked example.",
+                "activity_type": "quiz",
+                "difficulty_level": "Hard" if difficulty == "hard" else "Medium",
+                "resource_type": "targeted practice",
+                "system_action": {
+                    "action_type": "quiz",
+                    "label": f"Generate {concept} Quiz",
+                    "settings": {
+                        "topic": concept,
+                        "difficulty": difficulty,
+                    },
+                },
+            }
+        )
+    return plan
+
+
+def _calculate_learning_trend(user_id: str, course_id: str, current_score: float) -> str:
+    conn = get_db_connection()
+    if not conn:
+        attempts = [
+            row for row in get_memory_learning_attempts_bucket(user_id)
+            if str(row.get("course_id") or "") == str(course_id or "")
+        ]
+        previous = float(attempts[-1].get("score") or 0) if attempts else None
+    else:
+        previous = None
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT score
+                        FROM learning_quiz_attempts
+                        WHERE user_id = %s AND course_id = %s
+                        ORDER BY created_at DESC
+                        LIMIT 1;
+                        """,
+                        (user_id, course_id),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        previous = float(row[0] or 0)
+        except Exception as e:
+            logger.error(f"Failed to calculate learning trend from DB: {e}")
+        finally:
+            conn.close()
+
+    if previous is None:
+        return "stable"
+
+    delta = float(current_score) - float(previous)
+    if delta >= 2.0:
+        return "improved"
+    if delta <= -2.0:
+        return "declined"
+    return "stable"
+
+
+def _normalize_question_result_item(item: Dict[str, Any], index: int) -> Dict[str, Any]:
+    question = str(item.get("question") or f"Question {index + 1}").strip() or f"Question {index + 1}"
+    got_right = item.get("what_you_got_right")
+    was_incorrect = item.get("what_was_incorrect")
+    missed = item.get("what_you_missed")
+    question_tip = str(item.get("question_tip") or "Review the core concept and solve one similar problem today.").strip()
+
+    normalized_incorrect: List[Dict[str, str]] = []
+    if isinstance(was_incorrect, list):
+        for entry in was_incorrect:
+            if isinstance(entry, dict):
+                claim = str(entry.get("student_claim") or "").strip()
+                correction = str(entry.get("correction") or "").strip()
+                if claim or correction:
+                    normalized_incorrect.append({
+                        "student_claim": claim or "Needs correction",
+                        "correction": correction or "Refer to the concept explanation.",
+                    })
+            elif isinstance(entry, str) and entry.strip():
+                normalized_incorrect.append({
+                    "student_claim": entry.strip(),
+                    "correction": "Refer to the concept explanation.",
+                })
+
+    return {
+        "question_index": int(item.get("question_index") or index + 1),
+        "question": question,
+        "what_you_got_right": [str(x).strip() for x in (got_right if isinstance(got_right, list) else []) if str(x).strip()],
+        "what_was_incorrect": normalized_incorrect,
+        "what_you_missed": [str(x).strip() for x in (missed if isinstance(missed, list) else []) if str(x).strip()],
+        "question_tip": question_tip or "Review the core concept and solve one similar problem today.",
+    }
+
+
+def _build_fallback_session_feedback_report(
+    session_questions: List[Dict[str, Any]],
+    overall_score: float,
+    learning_trend: str,
+) -> Dict[str, Any]:
+    normalized_results = []
+    for idx, item in enumerate(session_questions):
+        eval_obj = item.get("evaluation") if isinstance(item.get("evaluation"), dict) else {}
+        correct_points = eval_obj.get("correct_points") if isinstance(eval_obj.get("correct_points"), list) else []
+        incorrect_points = eval_obj.get("incorrect_points") if isinstance(eval_obj.get("incorrect_points"), list) else []
+        missing_points = eval_obj.get("missing_points") if isinstance(eval_obj.get("missing_points"), list) else []
+        tip = str(eval_obj.get("study_tip") or "Practice this concept with one applied example.").strip()
+
+        normalized_results.append(
+            {
+                "question_index": idx + 1,
+                "question": str(item.get("question") or f"Question {idx + 1}"),
+                "what_you_got_right": [str(x) for x in correct_points if str(x).strip()],
+                "what_was_incorrect": [
+                    {
+                        "student_claim": str(x),
+                        "correction": "Re-check the underlying concept and compare with the reference answer.",
+                    }
+                    for x in incorrect_points if str(x).strip()
+                ],
+                "what_you_missed": [str(x) for x in missing_points if str(x).strip()],
+                "question_tip": tip or "Practice this concept with one applied example.",
+            }
+        )
+
+    return {
+        "question_results": normalized_results,
+        "performance_summary": {
+            "overall_score": round(overall_score, 2),
+            "overall_percentage": round(overall_score, 2),
+            "fully_correct_count": 0,
+            "partially_correct_count": 0,
+            "incorrect_count": len(session_questions),
+            "estimated_conceptual_coverage": "Moderate",
+            "one_sentence_assessment": "Session completed. Review weak concepts and retry focused practice.",
+        },
+        "strength_areas": [],
+        "weak_areas": [],
+        "improvement_plan": [
+            {
+                "concept": "Core topic review",
+                "study_suggestion": "Generate a focused medium-difficulty quiz on your weakest concept.",
+                "activity_type": "quiz",
+                "difficulty_level": "Medium",
+                "resource_type": "topic practice",
+                "system_action": {
+                    "action_type": "quiz",
+                    "label": "Practice weakest concept",
+                    "settings": {
+                        "difficulty": "medium",
+                    },
+                },
+            }
+        ],
+        "next_step": "Attempt another short quiz and compare your score trend.",
+        "learning_trend": learning_trend,
+    }
+
+
+def save_session_feedback_report_record(
+    user_id: str,
+    chat_id: str,
+    course_id: Optional[str],
+    course_name: Optional[str],
+    topic: Optional[str],
+    report: Dict[str, Any],
+    session_score: Optional[float] = None,
+) -> Dict[str, Any]:
+    chat_scope = normalize_chat_id(chat_id)
+    payload = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "chat_id": chat_scope,
+        "course_id": course_id,
+        "course_name": course_name,
+        "topic": topic,
+        "session_score": session_score,
+        "report": report,
+    }
+
+    conn = get_db_connection()
+    if not conn:
+        get_memory_session_feedback_reports_bucket(user_id).append(payload)
+        return payload
+
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO learning_session_feedback_reports (
+                        id, user_id, chat_id, course_id, course_name, topic, session_score, report
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, user_id, chat_id, course_id, course_name, topic, session_score, report, created_at;
+                    """,
+                    (
+                        payload["id"],
+                        user_id,
+                        chat_scope,
+                        course_id,
+                        course_name,
+                        topic,
+                        session_score,
+                        json.dumps(report),
+                    ),
+                )
+                row = cur.fetchone()
+                return dict(row) if row else payload
+    finally:
+        conn.close()
+
+
+def fetch_session_feedback_reports(user_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+    conn = get_db_connection()
+    if not conn:
+        bucket = get_memory_session_feedback_reports_bucket(user_id)
+        return list(reversed(bucket[-max(1, int(limit)):]))
+
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, user_id, chat_id, course_id, course_name, topic, session_score, report, created_at
+                    FROM learning_session_feedback_reports
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                    LIMIT %s;
+                    """,
+                    (user_id, max(1, int(limit))),
+                )
+                return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def save_source_record(source: dict):
     chat_id = normalize_chat_id(source.get("chat_id"))
     conn = get_db_connection()
@@ -680,6 +1233,14 @@ class LearningAidRequest(BaseModel):
     num_questions: int = 5
     num_cards: int = 10
     max_chunks: int = 12
+    rag_context: Optional[str] = None
+    quiz_difficulty: str = "Mixed"
+    question_types: Optional[List[str]] = None
+    topic_focus: Optional[str] = None
+    existing_questions: Optional[List[str]] = None
+    previous_questions: Optional[List[str]] = None
+    card_mode: str = "Question->Answer"
+    existing_cards: Optional[List[str]] = None
 
 
 class LearningScoreSubmissionRequest(BaseModel):
@@ -690,6 +1251,35 @@ class LearningScoreSubmissionRequest(BaseModel):
     total_questions: int
     correct_answers: int
     feedback: Optional[str] = None
+
+
+class SessionQuestionPayload(BaseModel):
+    question: str
+    question_type: Optional[str] = None
+    reference_answer: str
+    student_answer: str
+    evaluation: Dict[str, Any] = {}
+
+
+class SessionFeedbackReportRequest(BaseModel):
+    user_id: str
+    chat_id: str = "default"
+    course_id: Optional[str] = None
+    course_name: Optional[str] = None
+    topic: Optional[str] = None
+    retrieved_context_chunks: List[str] = []
+    session_questions: List[SessionQuestionPayload]
+    previous_score: Optional[float] = None
+
+
+class SaveSessionFeedbackReportRequest(BaseModel):
+    user_id: str
+    chat_id: str = "default"
+    course_id: Optional[str] = None
+    course_name: Optional[str] = None
+    topic: Optional[str] = None
+    report: Dict[str, Any]
+    session_score: Optional[float] = None
 
 
 # Shared components and per-user pipelines
@@ -1009,10 +1599,15 @@ def _clean_llm_json(raw: str) -> str:
 @app.post("/api/generate/quiz")
 def generate_quiz(req: LearningAidRequest):
     user_pipeline = get_user_pipeline(req.user_id, req.chat_id)
-    result = user_pipeline["rag_generator"].generate_quiz(
-        num_questions=req.num_questions,
-        max_chunks=req.max_chunks,
-    )
+    result = user_pipeline["rag_generator"].generate_quiz_from_config({
+        "number_of_questions": req.num_questions,
+        "max_chunks": req.max_chunks,
+        "difficulty": req.quiz_difficulty,
+        "question_types": req.question_types,
+        "topic": req.topic_focus or req.topic,
+        "rag_context": req.rag_context,
+        "previous_questions": req.previous_questions or req.existing_questions,
+    })
     cleaned = _clean_llm_json(result.response)
     return {
         "content": cleaned,
@@ -1027,6 +1622,9 @@ def generate_flashcards(req: LearningAidRequest):
     result = user_pipeline["rag_generator"].generate_flashcards(
         num_cards=req.num_cards,
         max_chunks=req.max_chunks,
+        card_mode=req.card_mode,
+        topic_focus=req.topic_focus,
+        existing_cards=req.existing_cards,
     )
     cleaned = _clean_llm_json(result.response)
     return {
@@ -1038,19 +1636,33 @@ def generate_flashcards(req: LearningAidRequest):
 
 @app.post("/api/generate/mindmap")
 def generate_mindmap(req: LearningAidRequest):
-    user_pipeline = get_user_pipeline(req.user_id, req.chat_id)
-    result = user_pipeline["rag_generator"].generate_mindmap(
-        max_chunks=req.max_chunks,
-        topic=req.topic,
-        difficulty_level=req.difficulty_level,
-        learning_objective=req.learning_objective,
-    )
-    cleaned = _clean_llm_json(result.response)
-    return {
-        "content": cleaned,
-        "sources": result.sources_used,
-        "retrieval_count": result.retrieval_count,
-    }
+    try:
+        user_pipeline = get_user_pipeline(req.user_id, req.chat_id)
+        result = user_pipeline["rag_generator"].generate_mindmap(
+            max_chunks=req.max_chunks,
+            topic=req.topic,
+            difficulty_level=req.difficulty_level,
+            learning_objective=req.learning_objective,
+        )
+        cleaned = _clean_llm_json(result.response)
+        return {
+            "content": cleaned,
+            "sources": result.sources_used,
+            "retrieval_count": result.retrieval_count,
+        }
+    except Exception as e:
+        logger.exception("Error in mindmap generation")
+        fallback = {
+            "id": "root",
+            "label": req.topic or "Mind Map",
+            "children": [],
+        }
+        return {
+            "content": json.dumps(fallback),
+            "sources": [],
+            "retrieval_count": 0,
+            "error": str(e),
+        }
 
 
 @app.post("/api/generate/summary")
@@ -1108,6 +1720,149 @@ def get_learning_scores(user_id: str):
         return fetch_learning_score_summary(user_id)
     except Exception as e:
         logger.error(f"Failed to fetch learning scores: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/learning/session-feedback-report")
+def generate_session_feedback_report(req: SessionFeedbackReportRequest):
+    if not req.user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if not req.session_questions:
+        raise HTTPException(status_code=400, detail="session_questions is required")
+
+    chat_scope = normalize_chat_id(req.chat_id)
+    resolved_course_id = (req.course_id or chat_scope).strip() or chat_scope
+    resolved_course_name = (req.course_name or "").strip() or resolved_course_id
+    resolved_topic = (req.topic or resolved_course_name).strip() or resolved_course_name
+
+    question_items = [
+        _coerce_question_item(item.model_dump(), index, resolved_topic)
+        for index, item in enumerate(req.session_questions)
+    ]
+    metrics = _aggregate_session_metrics(question_items)
+    learning_trend = _calculate_learning_trend(req.user_id, resolved_course_id, float(metrics["overall_percentage"]))
+
+    llm_payload = {
+        "topic": resolved_topic,
+        "course_name": resolved_course_name,
+        "difficulty_mix": {
+            "easy": sum(1 for item in question_items if _safe_text(item.get("difficulty")).lower() == "easy"),
+            "medium": sum(1 for item in question_items if _safe_text(item.get("difficulty")).lower() == "medium"),
+            "hard": sum(1 for item in question_items if _safe_text(item.get("difficulty")).lower() == "hard"),
+            "mixed": sum(1 for item in question_items if _safe_text(item.get("difficulty")).lower() == "mixed"),
+        },
+        "metrics": metrics,
+        "question_evaluations": question_items,
+    }
+    logger.info("Evaluation Payload: %s", json.dumps(llm_payload)[:8000])
+
+    parsed: Dict[str, Any] = {}
+    try:
+        user_pipeline = get_user_pipeline(req.user_id, req.chat_id)
+        llm_result = user_pipeline["rag_generator"].generate_session_feedback_report(
+            session_questions=question_items,
+            retrieved_context_chunks=req.retrieved_context_chunks,
+            topic=resolved_topic,
+            course_name=resolved_course_name,
+            previous_score=req.previous_score,
+        )
+        response_text = _safe_text(getattr(llm_result, "response", ""), "")
+        if response_text and not response_text.lower().startswith("error:"):
+            cleaned = _clean_llm_json(response_text)
+            parsed = _safe_parse_json(cleaned)
+    except Exception as e:
+        logger.error(f"Session feedback LLM generation failed, using fallback: {e}")
+        parsed = {}
+
+    if not parsed:
+        parsed = _build_fallback_session_feedback_report(
+            session_questions=question_items,
+            overall_score=float(metrics["overall_percentage"]),
+            learning_trend=learning_trend,
+        )
+
+    parsed["question_results"] = _build_question_results_from_items(question_items)
+
+    concept_rollup = _build_concept_rollup(question_items)
+    fallback_strengths = _fallback_strength_areas(concept_rollup)
+    fallback_weaks = _fallback_weak_areas(concept_rollup)
+    fallback_plan = _fallback_improvement_plan(fallback_weaks, resolved_topic)
+
+    strength_areas = [item for item in (parsed.get("strength_areas") or []) if isinstance(item, dict)]
+    weak_areas = [item for item in (parsed.get("weak_areas") or []) if isinstance(item, dict)]
+    improvement_plan = [item for item in (parsed.get("improvement_plan") or []) if isinstance(item, dict)]
+
+    if not strength_areas:
+        strength_areas = fallback_strengths
+    if not weak_areas:
+        weak_areas = fallback_weaks
+    if not improvement_plan:
+        improvement_plan = fallback_plan
+
+    parsed["performance_summary"] = {
+        "overall_score": float(metrics["total_score"]),
+        "total_score": float(metrics["total_score"]),
+        "total_max_score": float(metrics["total_max_score"]),
+        "overall_percentage": float(metrics["overall_percentage"]),
+        "fully_correct_count": int(metrics["fully_correct_count"]),
+        "partially_correct_count": int(metrics["partially_correct_count"]),
+        "incorrect_count": int(metrics["incorrect_count"]),
+        "estimated_conceptual_coverage": "High" if metrics["overall_percentage"] >= 75 else "Moderate" if metrics["overall_percentage"] >= 50 else "Low",
+        "one_sentence_assessment": _safe_text(parsed.get("performance_summary", {}).get("one_sentence_assessment") if isinstance(parsed.get("performance_summary"), dict) else "", metrics["tier"]),
+        "performance_tier": metrics["tier"],
+    }
+
+    parsed["strength_areas"] = strength_areas
+    parsed["weak_areas"] = weak_areas
+    parsed["improvement_plan"] = improvement_plan
+    parsed["next_step"] = _safe_text(
+        parsed.get("next_step"),
+        f"Start with { _safe_text(weak_areas[0].get('concept') if weak_areas else resolved_topic, resolved_topic) } and run a targeted practice quiz.",
+    )
+    parsed["learning_trend"] = learning_trend
+
+    return {
+        "topic": resolved_topic,
+        "course_name": resolved_course_name,
+        "report": parsed,
+    }
+
+
+@app.post("/api/learning/session-feedback-report/save")
+def save_session_feedback_report(req: SaveSessionFeedbackReportRequest):
+    if not req.user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    chat_scope = normalize_chat_id(req.chat_id)
+    try:
+        row = save_session_feedback_report_record(
+            user_id=req.user_id,
+            chat_id=chat_scope,
+            course_id=req.course_id,
+            course_name=req.course_name,
+            topic=req.topic,
+            report=req.report,
+            session_score=req.session_score,
+        )
+        return {
+            "status": "ok",
+            "report": row,
+        }
+    except Exception as e:
+        logger.error(f"Failed to save session feedback report: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/learning/session-feedback-reports")
+def get_session_feedback_reports(user_id: str, limit: int = 10):
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+
+    try:
+        rows = fetch_session_feedback_reports(user_id=user_id, limit=limit)
+        return {"reports": rows}
+    except Exception as e:
+        logger.error(f"Failed to fetch session feedback reports: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

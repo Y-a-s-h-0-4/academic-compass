@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { CheckCircle2, XCircle, ChevronRight, RotateCcw, Trophy } from "lucide-react";
+import { CheckCircle2, XCircle, ChevronRight, RotateCcw, Trophy, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface QuizOption {
@@ -13,12 +13,49 @@ interface QuizQuestion {
   question: string;
   options: QuizOption[];
   explanation?: string;
+  question_id?: string;
+  question_type?: string;
+  concept_tested?: string;
+  difficulty?: string;
+  concept_tags?: string[];
 }
 
 interface QuizViewProps {
   questions: QuizQuestion[];
-  onComplete?: (result: { totalQuestions: number; correctAnswers: number; scorePercent: number; feedback: string }) => void;
+  onComplete?: (result: {
+    totalQuestions: number;
+    correctAnswers: number;
+    scorePercent: number;
+    feedback: string;
+    questionResults: Array<{
+      question_id?: string;
+      question: string;
+      question_type?: string;
+      concept_tested?: string;
+      difficulty?: string;
+      concept_tags?: string[];
+      score?: number;
+      max_score?: number;
+      correct_points?: string[];
+      incorrect_points?: string[];
+      missing_points?: string[];
+      reference_answer: string;
+      student_answer: string;
+      evaluation: Record<string, any>;
+      what_you_got_right: string[];
+      what_was_incorrect: Array<{ student_claim: string; correction: string }>;
+      what_you_missed: string[];
+      question_tip: string;
+    }>;
+  }) => void | Promise<void>;
 }
+
+type QuestionFeedbackPayload = {
+  what_you_got_right: string[];
+  what_was_incorrect: Array<{ student_claim: string; correction: string }>;
+  what_you_missed: string[];
+  question_tip: string;
+};
 
 export const QuizView = ({ questions, onComplete }: QuizViewProps) => {
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -26,6 +63,53 @@ export const QuizView = ({ questions, onComplete }: QuizViewProps) => {
   const [answered, setAnswered] = useState(false);
   const [score, setScore] = useState(0);
   const [finished, setFinished] = useState(false);
+  const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
+  const [finalResult, setFinalResult] = useState<{
+    totalQuestions: number;
+    correctAnswers: number;
+    scorePercent: number;
+    feedback: string;
+    questionResults: Array<{
+      question_id?: string;
+      question: string;
+      question_type?: string;
+      concept_tested?: string;
+      difficulty?: string;
+      concept_tags?: string[];
+      score?: number;
+      max_score?: number;
+      correct_points?: string[];
+      incorrect_points?: string[];
+      missing_points?: string[];
+      reference_answer: string;
+      student_answer: string;
+      evaluation: Record<string, any>;
+      what_you_got_right: string[];
+      what_was_incorrect: Array<{ student_claim: string; correction: string }>;
+      what_you_missed: string[];
+      question_tip: string;
+    }>;
+  } | null>(null);
+  const [questionResults, setQuestionResults] = useState<Array<{
+    question_id?: string;
+    question: string;
+    question_type?: string;
+    concept_tested?: string;
+    difficulty?: string;
+    concept_tags?: string[];
+    score?: number;
+    max_score?: number;
+    correct_points?: string[];
+    incorrect_points?: string[];
+    missing_points?: string[];
+    reference_answer: string;
+    student_answer: string;
+    evaluation: Record<string, any>;
+    what_you_got_right: string[];
+    what_was_incorrect: Array<{ student_claim: string; correction: string }>;
+    what_you_missed: string[];
+    question_tip: string;
+  }>>([]);
 
   if (!questions || questions.length === 0) {
     return (
@@ -37,11 +121,87 @@ export const QuizView = ({ questions, onComplete }: QuizViewProps) => {
 
   const question = questions[currentIndex];
 
+  const buildQuestionFeedback = (selected: QuizOption): QuestionFeedbackPayload => {
+    const correctOption = question.options.find((item) => item.isCorrect);
+    const isCorrect = selected.isCorrect;
+    const explanationText = (question.explanation || "").trim();
+
+    const gotRight = isCorrect
+      ? ["You selected the correct option based on the concept being tested."]
+      : [];
+
+    const wasIncorrect = isCorrect || !correctOption
+      ? []
+      : [{
+          student_claim: selected.text,
+          correction: `The correct answer is ${correctOption.text}. ${explanationText || "Review the concept logic behind this question."}`,
+        }];
+
+    const missed = isCorrect
+      ? []
+      : [
+          explanationText || "You missed the conceptual relation captured in the correct option.",
+        ];
+
+    const tip = isCorrect
+      ? "Try a harder variation of this concept to strengthen mastery."
+      : "Re-read the explanation and solve one similar question immediately."
+;
+
+    return {
+      what_you_got_right: gotRight,
+      what_was_incorrect: wasIncorrect,
+      what_you_missed: missed,
+      question_tip: tip,
+    };
+  };
+
   const handleSelect = (option: QuizOption) => {
     if (answered) return;
     setSelectedId(option.id);
     setAnswered(true);
     if (option.isCorrect) setScore((s) => s + 1);
+
+    const feedback = buildQuestionFeedback(option);
+    const correctOption = question.options.find((item) => item.isCorrect);
+
+    setQuestionResults((prev) => {
+      const next = [...prev];
+      const scoreAwarded = option.isCorrect ? 1 : 0;
+      const maxScore = 1;
+      const conceptTags = Array.isArray(question.concept_tags) && question.concept_tags.length > 0
+        ? question.concept_tags
+        : (question.concept_tested ? [question.concept_tested] : []);
+
+      next[currentIndex] = {
+        question_id: question.question_id || `q${currentIndex + 1}`,
+        question: question.question,
+        question_type: question.question_type || "mcq",
+        concept_tested: question.concept_tested || "",
+        difficulty: question.difficulty || "mixed",
+        concept_tags: conceptTags,
+        score: scoreAwarded,
+        max_score: maxScore,
+        correct_points: feedback.what_you_got_right,
+        incorrect_points: feedback.what_was_incorrect.map((item) => item.student_claim),
+        missing_points: feedback.what_you_missed,
+        reference_answer: correctOption?.text || "",
+        student_answer: option.text,
+        evaluation: {
+          score: scoreAwarded,
+          max_score: maxScore,
+          correct_points: feedback.what_you_got_right,
+          incorrect_points: feedback.what_was_incorrect.map((item) => item.student_claim),
+          missing_points: feedback.what_you_missed,
+          study_tip: feedback.question_tip,
+        },
+        what_you_got_right: feedback.what_you_got_right,
+        what_was_incorrect: feedback.what_was_incorrect,
+        what_you_missed: feedback.what_you_missed,
+        question_tip: feedback.question_tip,
+      };
+      return next;
+    });
   };
 
   const handleNext = () => {
@@ -62,13 +222,24 @@ export const QuizView = ({ questions, onComplete }: QuizViewProps) => {
           ? "Developing understanding. Revise key concepts and retry."
           : "Foundational gaps detected. Revisit this course section before the next attempt.";
 
-      onComplete?.({
+      setFinalResult({
         totalQuestions: questions.length,
         correctAnswers: score,
         scorePercent: finalPercent,
         feedback,
+        questionResults,
       });
       setFinished(true);
+    }
+  };
+
+  const handleSubmitForFullFeedback = async () => {
+    if (!finalResult || !onComplete || isSubmittingFeedback) return;
+    setIsSubmittingFeedback(true);
+    try {
+      await Promise.resolve(onComplete(finalResult));
+    } finally {
+      setIsSubmittingFeedback(false);
     }
   };
 
@@ -78,6 +249,9 @@ export const QuizView = ({ questions, onComplete }: QuizViewProps) => {
     setAnswered(false);
     setScore(0);
     setFinished(false);
+    setIsSubmittingFeedback(false);
+    setFinalResult(null);
+    setQuestionResults([]);
   };
 
   if (finished) {
@@ -94,6 +268,15 @@ export const QuizView = ({ questions, onComplete }: QuizViewProps) => {
         <p className="text-sm text-muted-foreground">
           {pct === 100 ? "Perfect score! 🎉" : pct >= 70 ? "Great job! 👏" : pct >= 40 ? "Good effort, keep going!" : "Review your material and try again."}
         </p>
+        <div className="w-full max-w-sm space-y-2">
+          <Button className="w-full" onClick={handleSubmitForFullFeedback} disabled={isSubmittingFeedback || !onComplete}>
+            {isSubmittingFeedback ? (
+              <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Analysing your answers...</>
+            ) : (
+              "Submit Quiz & Get Full Feedback"
+            )}
+          </Button>
+        </div>
         <Button size="sm" variant="outline" onClick={restart}>
           <RotateCcw className="w-3.5 h-3.5 mr-2" /> Try Again
         </Button>
