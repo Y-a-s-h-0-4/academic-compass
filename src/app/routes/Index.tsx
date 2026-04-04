@@ -434,6 +434,21 @@ type QuizCompletionPayload = {
   }>;
 };
 
+type LearningAnalyticsEvent = {
+  id: string;
+  action: string;
+  courseId: string;
+  courseName: string;
+  createdAt: number;
+  score?: number;
+};
+
+type CourseQuizMetric = {
+  attempts: number;
+  totalScore: number;
+  lastScore: number;
+};
+
 const Index = () => {
   const { userId } = useUserContext();
   const [activePage, setActivePage] = useState("home");
@@ -500,6 +515,8 @@ const Index = () => {
   const [theme, setTheme] = useState<"light" | "dark">("dark");
   const [courseTimers, setCourseTimers] = useState<Record<string, number>>({});
   const [runningCourseTimerId, setRunningCourseTimerId] = useState<string | null>(null);
+  const [learningActivity, setLearningActivity] = useState<LearningAnalyticsEvent[]>([]);
+  const [courseQuizMetrics, setCourseQuizMetrics] = useState<Record<string, CourseQuizMetric>>({});
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const mainAudioRef = useRef<HTMLAudioElement>(null);
@@ -1001,7 +1018,7 @@ const Index = () => {
         // Auto-submit after 2 seconds of silence
         setTimeout(() => {
           const finalText = voiceTextRef.current.trim();
-          if (finalText && userId && activeChatId && sources.length > 0) {
+          if (finalText && userId && activeChatId) {
             handleQuerySubmitWithText(finalText);
           }
         }, 100);
@@ -1138,6 +1155,87 @@ const Index = () => {
   const headerTitle = activeCourse?.title || activeChat?.title || "No Course Opened";
   const activeCourseElapsed = activeContextId ? (courseTimers[activeContextId] || 0) : 0;
 
+  const resolveCourseContext = useCallback(() => {
+    const selectedChat = chats.find((chat) => chat.id === activeChatId) || null;
+    if (selectedChat?.courseId) {
+      const selectedCourse = courses.find((course) => course.id === selectedChat.courseId) || null;
+      if (selectedCourse) {
+        return {
+          courseId: selectedCourse.id,
+          courseName: selectedCourse.title,
+        };
+      }
+    }
+
+    if (selectedChat) {
+      return {
+        courseId: selectedChat.id,
+        courseName: selectedChat.title,
+      };
+    }
+
+    return {
+      courseId: "unknown",
+      courseName: "Uncategorized",
+    };
+  }, [activeChatId, chats, courses]);
+
+  const trackLearningActivity = useCallback((event: Omit<LearningAnalyticsEvent, "id" | "createdAt">) => {
+    setLearningActivity((prev) => [
+      {
+        ...event,
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        createdAt: Date.now(),
+      },
+      ...prev,
+    ].slice(0, 80));
+  }, []);
+
+  const analyticsCourses = courses.map((course) => {
+    const quizMetric = courseQuizMetrics[course.id];
+    const aidGenerations = learningActivity.filter(
+      (item) => item.courseId === course.id && item.action.toLowerCase().includes("generated"),
+    ).length;
+    const chatCount = chats.filter((chat) => chat.courseId === course.id).length;
+
+    return {
+      id: course.id,
+      title: course.title,
+      studySeconds: courseTimers[course.id] || 0,
+      quizAttempts: quizMetric?.attempts || 0,
+      averageQuizScore: quizMetric && quizMetric.attempts > 0
+        ? quizMetric.totalScore / quizMetric.attempts
+        : 0,
+      aidGenerations,
+      chatCount,
+    };
+  });
+
+  const computeCourseProgress = (course: {
+    studySeconds: number;
+    aidGenerations: number;
+    averageQuizScore: number;
+  }) => {
+    const timeScore = Math.min(100, (course.studySeconds / 7200) * 100);
+    const aidScore = Math.min(100, course.aidGenerations * 15);
+    const quizScore = Math.max(0, Math.min(100, course.averageQuizScore || 0));
+    return Math.round(Math.max(0, Math.min(100, timeScore * 0.35 + aidScore * 0.25 + quizScore * 0.4)));
+  };
+
+  const analyticsByCourseId = analyticsCourses.reduce((acc, course) => {
+    acc[course.id] = {
+      ...course,
+      progress: computeCourseProgress(course),
+    };
+    return acc;
+  }, {} as Record<string, (typeof analyticsCourses)[number] & { progress: number }>);
+
+  const totalStudySeconds = Object.values(courseTimers).reduce((sum, value) => sum + value, 0);
+  const totalAidGenerations = learningActivity.filter((item) => item.action.toLowerCase().includes("generated")).length;
+  const totalQuizAttempts = Object.values(courseQuizMetrics).reduce((sum, metric) => sum + metric.attempts, 0);
+  const totalQuizScore = Object.values(courseQuizMetrics).reduce((sum, metric) => sum + metric.totalScore, 0);
+  const overallQuizAccuracy = totalQuizAttempts > 0 ? totalQuizScore / totalQuizAttempts : 0;
+
   const handleQuerySubmitWithText = async (text: string) => {
     if (!text.trim()) return;
     if (!userId) {
@@ -1148,7 +1246,17 @@ const Index = () => {
       setQueryWarning("Create or select a chat first.");
       return;
     }
-    if (sources.length === 0) {
+
+    let availableSourceCount = sources.length;
+    if (availableSourceCount === 0) {
+      try {
+        availableSourceCount = await refreshSources();
+      } catch {
+        availableSourceCount = 0;
+      }
+    }
+
+    if (availableSourceCount === 0) {
       setQueryWarning("No sources yet. Use the + button to add PDFs, documents, or web links first.");
       return;
     }
@@ -1570,7 +1678,32 @@ const Index = () => {
   };
 
   const handleGenerateAid = async (type: LearningAidType, force = false) => {
-    if (!userId || !activeChatId || sources.length === 0) return;
+    if (!userId) {
+      setQueryWarning("Please sign in to generate learning aids.");
+      return;
+    }
+
+    if (!activeChatId) {
+      setQueryWarning("Create or select a chat first.");
+      return;
+    }
+
+    let availableSourceCount = sources.length;
+    if (availableSourceCount === 0) {
+      try {
+        availableSourceCount = await refreshSources();
+      } catch {
+        availableSourceCount = 0;
+      }
+    }
+
+    if (availableSourceCount === 0) {
+      setQueryWarning(
+        "No sources are loaded for this chat yet. Generation may be limited until you add content with the + button.",
+      );
+    } else {
+      setQueryWarning(null);
+    }
     // If already generated (and not an error), just show the tab
     if (!force && learningAids[type] && !learningAids[type]?.error) {
       setActiveAidTab(type);
@@ -1643,6 +1776,22 @@ const Index = () => {
 
       if (isValid) {
         setLearningAids((prev) => ({ ...prev, [type]: parsed }));
+        const { courseId, courseName } = resolveCourseContext();
+        const generatedCount = Array.isArray(parsed) ? parsed.length : 1;
+        const actionLabel =
+          type === "quiz"
+            ? `Generated quiz (${generatedCount} questions)`
+            : type === "flashcards"
+            ? `Generated flashcards (${generatedCount} cards)`
+            : type === "mindmap"
+            ? "Generated mind map"
+            : "Generated summary";
+
+        trackLearningActivity({
+          action: actionLabel,
+          courseId,
+          courseName,
+        });
       } else {
         console.error(`Invalid ${type} data:`, parsed);
         const msg = typeof parsed === "string" && parsed.length > 0 && parsed.length < 200
@@ -1652,6 +1801,7 @@ const Index = () => {
       }
     } catch (err: any) {
       console.error(`Failed to generate ${type}:`, err);
+      setQueryWarning(err?.message || `Failed to generate ${type}.`);
       setLearningAids((prev) => ({ ...prev, [type]: { error: err?.message || "Failed to generate" } }));
     } finally {
       setAidLoading(null);
@@ -1659,7 +1809,7 @@ const Index = () => {
   };
 
   const handleAddMoreQuizQuestions = async () => {
-    if (!userId || !activeChatId || sources.length === 0) return;
+    if (!userId || !activeChatId) return;
 
     const currentQuiz = Array.isArray(learningAids.quiz) ? learningAids.quiz : [];
     const existingQuestions = currentQuiz
@@ -1695,6 +1845,12 @@ const Index = () => {
 
       setLearningAids((prev) => ({ ...prev, quiz: merged }));
       setActiveAidTab("quiz");
+      const { courseId, courseName } = resolveCourseContext();
+      trackLearningActivity({
+        action: "Generated additional quiz questions",
+        courseId,
+        courseName,
+      });
     } catch (err: any) {
       console.error("Failed to add more quiz questions:", err);
       setLearningAids((prev) => ({ ...prev, quiz: { error: err?.message || "Failed to add more questions" } }));
@@ -1704,7 +1860,7 @@ const Index = () => {
   };
 
   const handleAddMoreFlashcards = async () => {
-    if (!userId || !activeChatId || sources.length === 0) return;
+    if (!userId || !activeChatId) return;
 
     const currentFlashcards = Array.isArray(learningAids.flashcards) ? learningAids.flashcards : [];
     const existingCards = currentFlashcards
@@ -1749,6 +1905,12 @@ const Index = () => {
 
       setLearningAids((prev) => ({ ...prev, flashcards: merged }));
       setActiveAidTab("flashcards");
+      const { courseId, courseName } = resolveCourseContext();
+      trackLearningActivity({
+        action: "Generated additional flashcards",
+        courseId,
+        courseName,
+      });
     } catch (err: any) {
       console.error("Failed to add more flashcards:", err);
       setLearningAids((prev) => ({ ...prev, flashcards: { error: err?.message || "Failed to add more cards" } }));
@@ -1900,6 +2062,25 @@ const Index = () => {
     const courseName = activeCourse?.title || activeChat?.title || "Uncategorized";
     const topic = quizConfig.topic.trim() || courseName;
 
+    setCourseQuizMetrics((prev) => {
+      const current = prev[courseId] || { attempts: 0, totalScore: 0, lastScore: 0 };
+      return {
+        ...prev,
+        [courseId]: {
+          attempts: current.attempts + 1,
+          totalScore: current.totalScore + result.scorePercent,
+          lastScore: result.scorePercent,
+        },
+      };
+    });
+
+    trackLearningActivity({
+      action: "Completed quiz",
+      courseId,
+      courseName,
+      score: result.scorePercent,
+    });
+
     setLastQuizCompletion(result);
     setLastQuizCourseMeta({ courseId, courseName, topic });
 
@@ -1921,8 +2102,21 @@ const Index = () => {
   };
 
   useEffect(() => {
-    refreshSources();
+    refreshSources().catch((err: any) => {
+      console.error("Failed to refresh sources:", err);
+      setIngestMessage(err?.message || "Failed to refresh sources for this chat.");
+    });
   }, [userId, activeChatId]);
+
+  useEffect(() => {
+    if (
+      sources.length > 0 &&
+      queryWarning &&
+      queryWarning.toLowerCase().includes("no sources")
+    ) {
+      setQueryWarning(null);
+    }
+  }, [sources.length, queryWarning]);
 
   useEffect(() => {
     if (activePage !== "sources") return;
@@ -2367,6 +2561,8 @@ const Index = () => {
                   multiple
                   accept=".pdf,.ppt,.pptx,.doc,.docx,.txt,.csv,.xlsx"
                   onChange={handleFileSelect}
+                  aria-label="Upload source files"
+                  title="Upload source files"
                   className="hidden"
                 />
 
@@ -2548,7 +2744,7 @@ const Index = () => {
                         variant="outline"
                         size="icon"
                         className="h-[52px] w-[52px] flex-shrink-0"
-                        disabled={!userId || sources.length === 0}
+                        disabled={!userId || !activeChatId}
                         title="Generate learning aids"
                       >
                         <GraduationCap className="w-5 h-5" />
@@ -2659,6 +2855,7 @@ const Index = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {courses.map((course) => {
                 const chatCount = chats.filter((chat) => chat.courseId === course.id).length;
+                const courseAnalytics = analyticsByCourseId[course.id];
 
                 return (
                   <CourseCard
@@ -2669,7 +2866,7 @@ const Index = () => {
                     resourceCount={chatCount}
                     resourceLabel={chatCount === 1 ? "chat" : "chats"}
                     lastAccessed={new Date()}
-                    progress={0}
+                    progress={courseAnalytics?.progress || 0}
                     onClick={() => openCourseContext(course.id)}
                     onDelete={() => handleDeleteCourse(course.id)}
                   />
@@ -2686,7 +2883,16 @@ const Index = () => {
     }
 
     if (activePage === "analytics") {
-      return <AnalyticsView />;
+      return (
+        <AnalyticsView
+          courses={analyticsCourses}
+          recentActivity={learningActivity}
+          totalStudySeconds={totalStudySeconds}
+          totalAidGenerations={totalAidGenerations}
+          overallQuizAccuracy={overallQuizAccuracy}
+          totalQuizAttempts={totalQuizAttempts}
+        />
+      );
     }
 
     // Default fallback for other pages
@@ -2771,15 +2977,6 @@ const Index = () => {
             >
               {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="hidden sm:inline-flex"
-              onClick={() => setActivePage("courses")}
-            >
-              <BookOpen className="w-4 h-4 mr-2" />
-              Courses
-            </Button>
             <UserProfile />
           </div>
         </header>
@@ -2811,7 +3008,7 @@ const Index = () => {
         onFlashcardConfigChange={handleFlashcardConfigChange}
         onTabChange={(tab) => {
           setActiveAidTab(tab);
-          if ((!learningAids[tab] || learningAids[tab]?.error) && userId && sources.length > 0 && tab !== "quiz" && tab !== "flashcards") {
+          if ((!learningAids[tab] || learningAids[tab]?.error) && userId && activeChatId && tab !== "quiz" && tab !== "flashcards") {
             handleGenerateAid(tab, true);
           }
         }}

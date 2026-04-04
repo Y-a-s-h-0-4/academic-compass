@@ -140,7 +140,7 @@ export const Sidebar = ({
           <div className="mt-8">
             <div className="flex items-center justify-between mb-3 px-2">
               <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-                Your Chats
+                Your Courses
               </span>
               <Button variant="ghost" size="icon-sm" onClick={onAddChat}>
                 <Plus className="w-4 h-4" />

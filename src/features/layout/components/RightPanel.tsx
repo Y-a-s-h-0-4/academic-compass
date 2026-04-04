@@ -180,7 +180,7 @@ export const RightPanel = ({
               </p>
             </div>
 
-            <div className="grid grid-cols-[1fr_1fr] gap-3">
+            <div className="grid grid-cols-1 gap-3">
               <div className="space-y-2">
                 <label className="text-sm text-muted-foreground">Questions</label>
                 <Input
@@ -260,7 +260,7 @@ export const RightPanel = ({
         )}
 
         {hasQuizData && (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button size="sm" variant="outline" onClick={() => onRegenerate("quiz") }>
               <RefreshCw className="w-3 h-3 mr-2" /> Regenerate
             </Button>
@@ -310,7 +310,7 @@ export const RightPanel = ({
               </p>
             </div>
 
-            <div className="grid grid-cols-[1fr_1fr] gap-3">
+            <div className="grid grid-cols-1 gap-3">
               <div className="space-y-2">
                 <label className="text-sm text-muted-foreground">Flashcards</label>
                 <Input
@@ -365,7 +365,7 @@ export const RightPanel = ({
         )}
 
         {hasFlashcardData && (
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Button size="sm" variant="outline" onClick={() => onRegenerate("flashcards")}>
               <RefreshCw className="w-3 h-3 mr-2" /> Regenerate
             </Button>
@@ -510,7 +510,7 @@ export const RightPanel = ({
           animate={{ x: 0, opacity: 1 }}
           exit={{ x: 100, opacity: 0 }}
           transition={{ type: "spring", damping: 25, stiffness: 300 }}
-          className="w-80 h-full bg-card border-l border-border flex flex-col"
+          className="w-[21.5rem] h-full bg-card border-l border-border flex flex-col"
         >
           <div className="p-4 border-b border-border flex items-center justify-between">
             <h3 className="font-serif text-lg text-foreground">Learning Aids</h3>
@@ -552,7 +552,7 @@ export const RightPanel = ({
             })}
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 scrollbar-thin">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 scrollbar-thin">
             {renderContent()}
           </div>
         </motion.div>

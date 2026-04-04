@@ -64,8 +64,8 @@ export const SessionReport = ({
 
   if (error) {
     return (
-      <div className="rounded-xl border border-red-200 bg-red-50/40 p-4 space-y-2">
-        <p className="text-sm text-red-700">{error}</p>
+      <div className="rounded-xl border border-red-300/70 bg-red-100/70 dark:border-red-900/70 dark:bg-red-950/40 p-4 space-y-2">
+        <p className="text-sm text-red-800 dark:text-red-200">{error}</p>
         <Button size="sm" variant="outline" onClick={onRetry}>Retry Report</Button>
       </div>
     );
@@ -81,7 +81,7 @@ export const SessionReport = ({
   const totalMax = typeof summary.total_max_score === "number" ? summary.total_max_score : 100;
 
   return (
-    <section className="rounded-2xl border border-border/70 bg-card/80 p-4 space-y-4">
+    <section className="rounded-2xl border border-border bg-card p-4 space-y-4 shadow-sm">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Sparkles className="w-4 h-4 text-primary" />
@@ -91,41 +91,44 @@ export const SessionReport = ({
       </div>
 
       <div className="space-y-2">
-        <div className="flex items-center justify-between text-xs text-muted-foreground">
+        <div className="flex items-center justify-between text-xs text-foreground/80">
           <span>Performance Summary</span>
           <span>{Math.round(summary.overall_percentage)}% ({Math.round(totalScore)}/{Math.round(totalMax)})</span>
         </div>
         <Progress value={Math.max(0, Math.min(100, summary.overall_percentage || 0))} />
-        <p className="text-xs text-muted-foreground">{summary.one_sentence_assessment}</p>
+        <p className="text-xs text-foreground/80 leading-relaxed">{summary.one_sentence_assessment}</p>
       </div>
 
       <div className="grid grid-cols-3 gap-2 text-center">
-        <div className="rounded-lg border border-green-200 bg-green-50/50 p-2">
-          <p className="text-xs text-muted-foreground">Fully Correct</p>
-          <p className="text-lg font-semibold text-green-700">{summary.fully_correct_count}</p>
+        <div className="rounded-lg border border-emerald-300/70 bg-emerald-100/70 dark:border-emerald-800 dark:bg-emerald-950/40 p-2">
+          <p className="text-xs text-emerald-900 dark:text-emerald-200">Fully Correct</p>
+          <p className="text-lg font-semibold text-emerald-700 dark:text-emerald-300">{summary.fully_correct_count}</p>
         </div>
-        <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-2">
-          <p className="text-xs text-muted-foreground">Partial</p>
-          <p className="text-lg font-semibold text-amber-700">{summary.partially_correct_count}</p>
+        <div className="rounded-lg border border-amber-300/70 bg-amber-100/70 dark:border-amber-800 dark:bg-amber-950/40 p-2">
+          <p className="text-xs text-amber-900 dark:text-amber-200">Partial</p>
+          <p className="text-lg font-semibold text-amber-700 dark:text-amber-300">{summary.partially_correct_count}</p>
         </div>
-        <div className="rounded-lg border border-red-200 bg-red-50/50 p-2">
-          <p className="text-xs text-muted-foreground">Incorrect</p>
-          <p className="text-lg font-semibold text-red-700">{summary.incorrect_count}</p>
+        <div className="rounded-lg border border-red-300/70 bg-red-100/70 dark:border-red-800 dark:bg-red-950/40 p-2">
+          <p className="text-xs text-red-900 dark:text-red-200">Incorrect</p>
+          <p className="text-lg font-semibold text-red-700 dark:text-red-300">{summary.incorrect_count}</p>
         </div>
       </div>
 
       <div className="space-y-2">
-        <p className="text-sm font-semibold text-green-800 flex items-center gap-2">
+        <p className="text-sm font-semibold text-emerald-700 dark:text-emerald-300 flex items-center gap-2">
           <CheckCircle className="w-4 h-4" /> Strength Areas
         </p>
         {report.strength_areas.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No strength areas were identified yet.</p>
+          <p className="text-xs text-foreground/70">No strength areas were identified yet.</p>
         ) : (
           <div className="space-y-2">
             {report.strength_areas.map((area, idx) => (
-              <div key={`${area.concept}-${idx}`} className="rounded-md border border-green-200 bg-green-50/40 p-2">
-                <p className="text-sm font-medium text-foreground">{area.concept}</p>
-                <p className="text-xs text-muted-foreground">{area.acknowledgement}</p>
+              <div
+                key={`${area.concept}-${idx}`}
+                className="rounded-md border border-emerald-300/70 bg-emerald-100/60 dark:border-emerald-800 dark:bg-emerald-950/30 p-2"
+              >
+                <p className="text-sm font-semibold text-foreground">{area.concept}</p>
+                <p className="text-xs text-foreground/80 leading-relaxed">{area.acknowledgement}</p>
               </div>
             ))}
           </div>
@@ -133,17 +136,20 @@ export const SessionReport = ({
       </div>
 
       <div className="space-y-2">
-        <p className="text-sm font-semibold text-amber-800 flex items-center gap-2">
+        <p className="text-sm font-semibold text-amber-700 dark:text-amber-300 flex items-center gap-2">
           <AlertTriangle className="w-4 h-4" /> Weak Areas
         </p>
         {report.weak_areas.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No weak areas were identified yet.</p>
+          <p className="text-xs text-foreground/70">No weak areas were identified yet.</p>
         ) : (
           <div className="space-y-2">
             {report.weak_areas.map((area, idx) => (
-              <div key={`${area.concept}-${idx}`} className="rounded-md border border-amber-200 bg-amber-50/40 p-2">
-                <p className="text-sm font-medium text-foreground">{area.concept}</p>
-                <p className="text-xs text-muted-foreground">{area.description}</p>
+              <div
+                key={`${area.concept}-${idx}`}
+                className="rounded-md border border-amber-300/70 bg-amber-100/60 dark:border-amber-800 dark:bg-amber-950/30 p-2"
+              >
+                <p className="text-sm font-semibold text-foreground">{area.concept}</p>
+                <p className="text-xs text-foreground/80 leading-relaxed">{area.description}</p>
               </div>
             ))}
           </div>
@@ -153,13 +159,13 @@ export const SessionReport = ({
       <div className="space-y-2">
         <p className="text-sm font-semibold text-foreground">Improvement Plan</p>
         {report.improvement_plan.length === 0 ? (
-          <p className="text-xs text-muted-foreground">No plan items available.</p>
+          <p className="text-xs text-foreground/70">No plan items available.</p>
         ) : (
           <div className="space-y-2">
             {report.improvement_plan.map((item, idx) => (
-              <div key={`${item.concept}-${idx}`} className="rounded-md border border-border p-2">
-                <p className="text-sm font-medium text-foreground">{item.concept}</p>
-                <p className="text-xs text-muted-foreground mb-2">{item.study_suggestion}</p>
+              <div key={`${item.concept}-${idx}`} className="rounded-md border border-border bg-background/50 p-2">
+                <p className="text-sm font-semibold text-foreground">{item.concept}</p>
+                <p className="text-xs text-foreground/80 mb-2 leading-relaxed">{item.study_suggestion}</p>
                 <Button size="sm" variant="outline" onClick={() => onAction(item)}>
                   {item.system_action?.label || "Practice Now"}
                 </Button>
@@ -169,9 +175,9 @@ export const SessionReport = ({
         )}
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" onClick={onSave} disabled={isSaved}>{isSaved ? "Saved" : "Save This Report"}</Button>
-        <p className="text-xs text-muted-foreground">{report.next_step}</p>
+        <p className="text-xs text-foreground/80">{report.next_step}</p>
       </div>
 
       {showDevFooter && (

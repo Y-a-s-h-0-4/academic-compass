@@ -18,10 +18,9 @@ interface StatCardProps {
   subtitle?: string;
   icon: React.ReactNode;
   trend?: { value: number; isPositive: boolean };
-  color?: string;
 }
 
-const StatCard = ({ title, value, subtitle, icon, trend, color = "primary" }: StatCardProps) => (
+const StatCard = ({ title, value, subtitle, icon, trend }: StatCardProps) => (
   <motion.div
     initial={{ opacity: 0, y: 20 }}
     animate={{ opacity: 1, y: 0 }}
@@ -29,7 +28,7 @@ const StatCard = ({ title, value, subtitle, icon, trend, color = "primary" }: St
     className="glass-panel-solid p-6"
   >
     <div className="flex items-start justify-between">
-      <div className={`w-12 h-12 rounded-xl bg-${color}/10 flex items-center justify-center`}>
+      <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center">
         {icon}
       </div>
       {trend && (
@@ -51,13 +50,15 @@ interface TopicProgressProps {
   topic: string;
   progress: number;
   quizzesTaken: number;
+  aidGenerations: number;
+  studyTimeLabel: string;
 }
 
-const TopicProgress = ({ topic, progress, quizzesTaken }: TopicProgressProps) => (
+const TopicProgress = ({ topic, progress, quizzesTaken, aidGenerations, studyTimeLabel }: TopicProgressProps) => (
   <div className="space-y-2">
     <div className="flex items-center justify-between">
       <span className="text-sm font-medium text-foreground">{topic}</span>
-      <span className="text-xs text-muted-foreground">{quizzesTaken} quizzes</span>
+      <span className="text-xs text-muted-foreground">{quizzesTaken} quizzes • {aidGenerations} aids • {studyTimeLabel}</span>
     </div>
     <div className="flex items-center gap-3">
       <Progress value={progress} className="flex-1" />
@@ -66,27 +67,135 @@ const TopicProgress = ({ topic, progress, quizzesTaken }: TopicProgressProps) =>
   </div>
 );
 
-export const AnalyticsView = () => {
+export type AnalyticsCourseMetric = {
+  id: string;
+  title: string;
+  studySeconds: number;
+  quizAttempts: number;
+  averageQuizScore: number;
+  aidGenerations: number;
+  chatCount: number;
+};
+
+export type AnalyticsActivityItem = {
+  id: string;
+  action: string;
+  courseName: string;
+  createdAt: number;
+  score?: number;
+};
+
+interface AnalyticsViewProps {
+  courses: AnalyticsCourseMetric[];
+  recentActivity: AnalyticsActivityItem[];
+  totalStudySeconds: number;
+  totalAidGenerations: number;
+  overallQuizAccuracy: number;
+  totalQuizAttempts: number;
+}
+
+const formatDuration = (totalSeconds: number) => {
+  const safeSeconds = Math.max(0, Math.floor(totalSeconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+
+  if (hours <= 0) {
+    return `${minutes}m`;
+  }
+
+  return `${hours}h ${minutes}m`;
+};
+
+const formatRelativeTime = (timestamp: number) => {
+  const deltaSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (deltaSeconds < 60) return "Just now";
+  if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m ago`;
+  if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)}h ago`;
+  return `${Math.floor(deltaSeconds / 86400)}d ago`;
+};
+
+export const AnalyticsView = ({
+  courses,
+  recentActivity,
+  totalStudySeconds,
+  totalAidGenerations,
+  overallQuizAccuracy,
+  totalQuizAttempts,
+}: AnalyticsViewProps) => {
+  const activeCoursesCount = courses.filter(
+    (course) => course.studySeconds > 0 || course.aidGenerations > 0 || course.quizAttempts > 0,
+  ).length;
+
+  const topicProgress = courses
+    .map((course) => {
+      const timeScore = Math.min(100, (course.studySeconds / 7200) * 100); // 2h ~= 100%
+      const aidScore = Math.min(100, course.aidGenerations * 15);
+      const quizScore = Math.max(0, Math.min(100, course.averageQuizScore || 0));
+      const composite = Math.round(timeScore * 0.35 + aidScore * 0.25 + quizScore * 0.4);
+
+      return {
+        topic: course.title,
+        progress: Math.max(0, Math.min(100, composite)),
+        quizzesTaken: course.quizAttempts,
+        aidGenerations: course.aidGenerations,
+        studyTimeLabel: formatDuration(course.studySeconds),
+      };
+    })
+    .sort((a, b) => b.progress - a.progress)
+    .slice(0, 8);
+
+  const recentItems = [...recentActivity]
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 10);
+
   const stats = [
-    { title: "Total Study Time", value: "24.5h", subtitle: "This week", icon: <Clock className="w-6 h-6 text-primary" />, trend: { value: 12, isPositive: true } },
-    { title: "Quiz Accuracy", value: "78%", subtitle: "Last 10 quizzes", icon: <Target className="w-6 h-6 text-success" />, trend: { value: 5, isPositive: true } },
-    { title: "Concepts Mastered", value: "32", subtitle: "Out of 48", icon: <Brain className="w-6 h-6 text-info" />, trend: { value: 8, isPositive: true } },
-    { title: "Resources Reviewed", value: "15", subtitle: "This month", icon: <BookOpen className="w-6 h-6 text-warning" />, trend: { value: 3, isPositive: true } },
+    {
+      title: "Total Study Time",
+      value: formatDuration(totalStudySeconds),
+      subtitle: "From course timers",
+      icon: <Clock className="w-6 h-6 text-primary" />,
+    },
+    {
+      title: "Quiz Accuracy",
+      value: `${Math.round(overallQuizAccuracy)}%`,
+      subtitle: `${totalQuizAttempts} attempt${totalQuizAttempts === 1 ? "" : "s"}`,
+      icon: <Target className="w-6 h-6 text-success" />,
+    },
+    {
+      title: "Learning Aids",
+      value: totalAidGenerations,
+      subtitle: "Quiz, cards, map, summary",
+      icon: <Brain className="w-6 h-6 text-info" />,
+    },
+    {
+      title: "Active Courses",
+      value: activeCoursesCount,
+      subtitle: `${courses.length} total course${courses.length === 1 ? "" : "s"}`,
+      icon: <BookOpen className="w-6 h-6 text-warning" />,
+    },
   ];
 
-  const topicProgress = [
-    { topic: "Linear Algebra", progress: 85, quizzesTaken: 8 },
-    { topic: "Neural Networks", progress: 72, quizzesTaken: 6 },
-    { topic: "Optimization", progress: 45, quizzesTaken: 4 },
-    { topic: "Probability", progress: 90, quizzesTaken: 10 },
-    { topic: "Deep Learning", progress: 38, quizzesTaken: 3 },
-  ];
-
-  const recentActivity = [
-    { action: "Completed quiz", topic: "Neural Networks", time: "2 hours ago", score: 85 },
-    { action: "Reviewed notes", topic: "Backpropagation", time: "5 hours ago" },
-    { action: "Asked question", topic: "Gradient Descent", time: "Yesterday" },
-    { action: "Completed quiz", topic: "Linear Algebra", time: "2 days ago", score: 92 },
+  const achievements = [
+    {
+      name: "Starter Focus",
+      desc: "Study for at least 10 minutes",
+      unlocked: totalStudySeconds >= 600,
+    },
+    {
+      name: "Quiz Explorer",
+      desc: "Complete 3 quiz attempts",
+      unlocked: totalQuizAttempts >= 3,
+    },
+    {
+      name: "Aid Builder",
+      desc: "Generate 5 learning aids",
+      unlocked: totalAidGenerations >= 5,
+    },
+    {
+      name: "Deep Focus",
+      desc: "Spend 1h on a single course",
+      unlocked: courses.some((course) => course.studySeconds >= 3600),
+    },
   ];
 
   return (
@@ -124,13 +233,19 @@ export const AnalyticsView = () => {
               <CardHeader>
                 <CardTitle className="font-serif text-xl flex items-center gap-2">
                   <Zap className="w-5 h-5 text-primary" />
-                  Topic Mastery
+                  Course Progress
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-5">
-                {topicProgress.map((topic) => (
-                  <TopicProgress key={topic.topic} {...topic} />
-                ))}
+                {topicProgress.length > 0 ? (
+                  topicProgress.map((topic) => (
+                    <TopicProgress key={topic.topic} {...topic} />
+                  ))
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    No course analytics yet. Start a timer and generate learning aids to build progress.
+                  </p>
+                )}
               </CardContent>
             </Card>
           </motion.div>
@@ -150,33 +265,39 @@ export const AnalyticsView = () => {
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
-                  {recentActivity.map((activity, i) => (
-                    <motion.div
-                      key={i}
-                      initial={{ opacity: 0, x: -10 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: 0.5 + i * 0.1 }}
-                      className="flex items-center gap-4 p-3 rounded-lg hover:bg-secondary/50 transition-colors"
-                    >
-                      <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center">
-                        {activity.score ? (
-                          <Award className="w-5 h-5 text-primary" />
-                        ) : (
-                          <BookOpen className="w-5 h-5 text-muted-foreground" />
-                        )}
-                      </div>
-                      <div className="flex-1">
-                        <p className="text-sm font-medium text-foreground">{activity.action}</p>
-                        <p className="text-xs text-muted-foreground">{activity.topic}</p>
-                      </div>
-                      <div className="text-right">
-                        {activity.score && (
-                          <p className="text-sm font-medium text-success">{activity.score}%</p>
-                        )}
-                        <p className="text-xs text-muted-foreground">{activity.time}</p>
-                      </div>
-                    </motion.div>
-                  ))}
+                  {recentItems.length > 0 ? (
+                    recentItems.map((activity, i) => (
+                      <motion.div
+                        key={activity.id}
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: 0.5 + i * 0.1 }}
+                        className="flex items-center gap-4 p-3 rounded-lg hover:bg-secondary/50 transition-colors"
+                      >
+                        <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center">
+                          {typeof activity.score === "number" ? (
+                            <Award className="w-5 h-5 text-primary" />
+                          ) : (
+                            <BookOpen className="w-5 h-5 text-muted-foreground" />
+                          )}
+                        </div>
+                        <div className="flex-1">
+                          <p className="text-sm font-medium text-foreground">{activity.action}</p>
+                          <p className="text-xs text-muted-foreground">{activity.courseName}</p>
+                        </div>
+                        <div className="text-right">
+                          {typeof activity.score === "number" && (
+                            <p className="text-sm font-medium text-success">{Math.round(activity.score)}%</p>
+                          )}
+                          <p className="text-xs text-muted-foreground">{formatRelativeTime(activity.createdAt)}</p>
+                        </div>
+                      </motion.div>
+                    ))
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      Recent learning activity will appear here once you start using quizzes and other learning aids.
+                    </p>
+                  )}
                 </div>
               </CardContent>
             </Card>
@@ -198,12 +319,7 @@ export const AnalyticsView = () => {
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {[
-                  { name: "Quick Learner", desc: "Complete 5 quizzes", unlocked: true },
-                  { name: "Perfect Score", desc: "Get 100% on a quiz", unlocked: true },
-                  { name: "Consistent", desc: "7 day streak", unlocked: false },
-                  { name: "Explorer", desc: "Use all features", unlocked: false },
-                ].map((achievement, i) => (
+                {achievements.map((achievement, i) => (
                   <motion.div
                     key={achievement.name}
                     initial={{ scale: 0 }}
