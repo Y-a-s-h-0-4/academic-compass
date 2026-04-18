@@ -318,6 +318,55 @@ const getVisualReferencesForMessage = (
   return visuals.slice(0, 3);
 };
 
+const getDedupedMessageSources = (sources?: Array<Record<string, any>>) => {
+  const input = Array.isArray(sources) ? sources : [];
+  const buckets = new Map<
+    string,
+    {
+      source: Record<string, any>;
+      references: number[];
+      pages: number[];
+    }
+  >();
+
+  for (const source of input) {
+    const sourceName = String(
+      source?.source_file || source?.asset_name || source?.name || source?.url || "",
+    ).trim();
+    const sourceKey = sourceName.toLowerCase() || String(source?.chunk_id || source?.id || "").trim();
+
+    if (!sourceKey) {
+      continue;
+    }
+
+    if (!buckets.has(sourceKey)) {
+      buckets.set(sourceKey, {
+        source,
+        references: [],
+        pages: [],
+      });
+    }
+
+    const bucket = buckets.get(sourceKey)!;
+    const refMatch = /^\[(\d+)\]$/.exec(String(source?.reference || "").trim());
+    const ref = refMatch ? Number(refMatch[1]) : null;
+    if (ref && !bucket.references.includes(ref)) {
+      bucket.references.push(ref);
+    }
+
+    const page = Number(source?.page_number);
+    if (Number.isFinite(page) && page > 0 && !bucket.pages.includes(page)) {
+      bucket.pages.push(page);
+    }
+  }
+
+  return Array.from(buckets.values()).map((bucket) => {
+    bucket.references.sort((a, b) => a - b);
+    bucket.pages.sort((a, b) => a - b);
+    return bucket;
+  });
+};
+
 const buildSourceViewUrl = (source: SourceItem, userId?: string | null): string => {
   const rawPath = (source.path || "").trim();
   if (!NOTEBOOK_API_URL) {
@@ -2300,6 +2349,7 @@ const Index = () => {
 
                 {messages.map((msg) => {
                   const visualSources = getVisualReferencesForMessage(msg.sources, msg.content);
+                  const dedupedSources = getDedupedMessageSources(msg.sources);
 
                   return (
                     <div
@@ -2372,17 +2422,27 @@ const Index = () => {
                           })}
                         </div>
 
-                        {msg.sources && msg.sources.length > 0 && (
+                        {dedupedSources.length > 0 && (
                           <div className="mt-3 pt-3 border-t border-border/50 space-y-1">
                             <p className="text-xs font-medium opacity-70">Sources:</p>
-                            {msg.sources.map((s: any, i: number) => (
-                              <div key={i} className="text-xs opacity-70">
-                                <span className="font-mono bg-background/20 px-1.5 py-0.5 rounded mr-1.5">
-                                  [{i + 1}]
-                                </span>
-                                {s.source_file} {s.page_number ? `(p. ${s.page_number})` : ""}
-                              </div>
-                            ))}
+                            {dedupedSources.map(({ source, references, pages }, i) => {
+                              const label = references.length > 0
+                                ? `[${references.join(",")}]`
+                                : `[${i + 1}]`;
+                              const sourceName = source?.source_file || source?.asset_name || source?.name || "Unknown source";
+                              const pageSuffix = pages.length > 0
+                                ? `(p. ${pages.join(", ")})`
+                                : "";
+
+                              return (
+                                <div key={`${sourceName}-${i}`} className="text-xs opacity-70">
+                                  <span className="font-mono bg-background/20 px-1.5 py-0.5 rounded mr-1.5">
+                                    {label}
+                                  </span>
+                                  {sourceName} {pageSuffix}
+                                </div>
+                              );
+                            })}
                           </div>
                         )}
 
