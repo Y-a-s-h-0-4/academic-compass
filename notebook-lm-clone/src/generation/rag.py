@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
@@ -72,7 +73,12 @@ class RAGGenerator:
         if model_name is None:
             model_name = "gemini-2.5-flash" if selected_provider == "gemini" else "gpt-4o-mini"
 
+        quiz_model_name = (os.getenv("QUIZ_LLM_MODEL") or "").strip() or None
+        if quiz_model_name is None:
+            quiz_model_name = "gemini-2.5-flash" if selected_provider == "gemini" else "gpt-4o-mini"
+
         model = model_name if "/" in model_name else f"{selected_provider}/{model_name}"
+        quiz_model = quiz_model_name if "/" in quiz_model_name else f"{selected_provider}/{quiz_model_name}"
         api_key = gemini_api_key if selected_provider == "gemini" else openai_api_key
         
         self.llm = LLM(
@@ -81,9 +87,17 @@ class RAGGenerator:
             max_tokens=max_tokens,
             api_key=api_key
         )
+
+        self.quiz_llm = LLM(
+            model=quiz_model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            api_key=api_key
+        )
         
         self.provider = selected_provider
         self.model_name = model_name
+        self.quiz_model_name = quiz_model_name
         logger.info(f"RAG Generator initialized with provider={selected_provider}, model={model}")
     
     def generate_response(
@@ -371,7 +385,11 @@ Return JSON only. Use this exact array schema:
   }}
 ]"""
 
-        response = self.llm.call(prompt)
+        try:
+            response = self.quiz_llm.call(prompt)
+        except Exception as e:
+            logger.warning(f"Quiz generation failed with quiz model {self.quiz_model_name}; retrying with normal model: {e}")
+            response = self.llm.call(prompt)
         return RAGResult(
             query="Quiz",
             response=response,

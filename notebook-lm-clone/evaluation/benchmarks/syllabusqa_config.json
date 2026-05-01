@@ -1,0 +1,59 @@
+{
+  "dataset_path": "syllabusqa-data/data/dataset_split",
+  "test_split": "test",
+  "output_dir": "outputs/syllabusqa_results",
+  "judge_model": {
+    "provider": "gemini",
+    "model": "models/gemini-2.5-flash"
+  },
+  "models": [
+    {
+      "name": "Gemini-2.5-Flash",
+      "provider": "gemini",
+      "model": "models/gemini-2.5-flash",
+      "temperature": 0.1,
+      "max_tokens": 1000,
+      "top_p": 1.0,
+      "notes": "Fast and efficient latest model"
+    },
+    {
+      "name": "Gemini-2.5-Pro",
+      "provider": "gemini",
+      "model": "models/gemini-2.5-pro",
+      "temperature": 0.1,
+      "max_tokens": 1000,
+      "top_p": 1.0,
+      "notes": "High quality latest model"
+    },
+    {
+      "name": "Gemini-2.0-Flash",
+      "provider": "gemini",
+      "model": "models/gemini-2.0-flash",
+      "temperature": 0.1,
+      "max_tokens": 1000,
+      "top_p": 1.0,
+      "notes": "Fast 2.0 generation model"
+    },
+    {
+      "name": "Gemini-1.5-Flash",
+      "provider": "gemini",
+      "model": "models/gemini-1.5-flash",
+      "temperature": 0.1,
+      "max_tokens": 1000,
+      "top_p": 1.0,
+      "notes": "1.5 generation fast model"
+    },
+    {
+      "name": "Gemini-1.5-Pro",
+      "provider": "gemini",
+      "model": "models/gemini-1.5-pro",
+      "temperature": 0.1,
+      "max_tokens": 1000,
+      "top_p": 1.0,
+      "notes": "1.5 generation pro model"
+    }
+  ],
+  "modes": ["zero_shot", "rag", "rag_cot"],
+  "sample_size": null,
+  "random_seed": 42
+}
